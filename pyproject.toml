@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autumn_py"
+version = "0.0.1"
+description = "Autumn reactive-DSL semantics embedded in Python via effectful algebraic effects"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "effectful>=0.3.1,<0.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["autumn_py*"]
+exclude = ["tests*", "examples*"]
