@@ -1,10 +1,81 @@
 from __future__ import annotations
 
+import typing
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .ops import alloc_obj_id, get_prev_var, get_var, set_var
 from .values import Cell, ObjectClassSpec, ObjectInstance, Position
+
+
+# --------------------------------------------------------------------------
+# Lightweight runtime type checker.
+#
+# Autumn's surface syntax includes (: x T) annotations. The C++ interpreter
+# parses and ignores them; we don't. The checker validates state-var init
+# values, @obj field values, initializer return types, and next-expression
+# return types against their declared annotations.
+#
+# It is intentionally lightweight: isinstance for ground types, list-only
+# for list[...] (no element-type check), special-cased ObjectInstance for
+# user-declared object classes, and `object` as a permissive escape hatch.
+# --------------------------------------------------------------------------
+
+class TypeMismatch(TypeError):
+    """Raised when a value fails its declared Autumn type annotation."""
+
+
+def _check_type(value: Any, expected: Any, context: str) -> None:
+    """Verify that ``value`` is compatible with the declared type ``expected``.
+
+    Raises ``TypeMismatch`` on failure. Does nothing when ``expected`` is
+    ``None`` (no annotation) or ``object`` (universal).
+    """
+    if expected is None or expected is object or expected is Any:
+        return
+
+    # Parameterised generics: list[T], tuple[T], etc. We handle list[T] (and
+    # typing.List[T]) by checking the container kind and recursively
+    # checking each element's type. Other generics fall through.
+    origin = typing.get_origin(expected)
+    if origin is list:
+        if not isinstance(value, list):
+            raise TypeMismatch(
+                f"{context}: expected list, got {type(value).__name__}"
+            )
+        args = typing.get_args(expected)
+        if args:
+            elem_type = args[0]
+            for i, elem in enumerate(value):
+                _check_type(elem, elem_type, f"{context}[{i}]")
+        return
+
+    # @obj-decorated factories carry their spec; treat them as object-class
+    # annotations: the value must be an ObjectInstance of that spec.
+    obj_spec = getattr(expected, "__autumn_obj_spec__", None)
+    if obj_spec is not None:
+        if isinstance(value, ObjectInstance) and value.cls is obj_spec:
+            return
+        raise TypeMismatch(
+            f"{context}: expected {obj_spec.name} instance, "
+            f"got {type(value).__name__}"
+        )
+
+    # Plain Python types — list, int, bool, str, dict, ObjectInstance,
+    # Position, Cell, ...
+    if isinstance(expected, type):
+        if isinstance(value, expected):
+            return
+        # Permit None as a placeholder for object-valued state vars whose
+        # initializer hasn't run yet.
+        if value is None and expected in (object,):
+            return
+        raise TypeMismatch(
+            f"{context}: expected {expected.__name__}, "
+            f"got {type(value).__name__} (value: {value!r})"
+        )
+
+    # Anything else — pass through; we don't enforce more elaborate generics.
 
 
 # --------------------------------------------------------------------------
@@ -74,6 +145,7 @@ class StateVar:
 
     def next(self, fn: Callable[[], Any]) -> Callable[[], Any]:
         """Register the decorated function as this var's initnext-next expression."""
+        self._check_return_annotation(fn, "next-expression")
         self._next_fn = fn
         return fn
 
@@ -82,6 +154,7 @@ class StateVar:
         Invoked by the Runtime's init phase under the persistent handler stack,
         so it may call effects like alloc_obj_id (ObjectInstance construction).
         Takes precedence over ``init=`` when both are set."""
+        self._check_return_annotation(fn, "initializer")
         self._init_fn = fn
         return fn
 
@@ -90,15 +163,46 @@ class StateVar:
         callable if one was registered; falls back to the static ``init=``."""
         return self._init_fn() if self._init_fn is not None else self.init
 
+    def _check_return_annotation(self, fn: Callable, kind: str) -> None:
+        """If the registered function has a return annotation that conflicts
+        with this StateVar's declared type, raise at decoration time."""
+        if self.type_ is None or self.type_ is object:
+            return
+        try:
+            hints = typing.get_type_hints(fn)
+        except Exception:
+            return
+        ret = hints.get("return")
+        if ret is None or ret is object or ret is Any:
+            return
+        # Compatible iff same type, or matching parameterised list[T] origin.
+        if ret is self.type_:
+            return
+        sv_origin = typing.get_origin(self.type_)
+        ret_origin = typing.get_origin(ret)
+        if sv_origin is not None and sv_origin is ret_origin:
+            return
+        raise TypeMismatch(
+            f"{kind} for state var {self.name!r}: function return type "
+            f"{getattr(ret, '__name__', ret)!r} does not match "
+            f"declared type {getattr(self.type_, '__name__', self.type_)!r}"
+        )
+
 
 def prev(ref) -> Any:
     """Read the previous-tick value of a state var.
 
     `ref` can be either the StateVar descriptor (preferred, identity-based) or
-    a raw attribute name.
+    a raw attribute name. §2.2: requires the referent to be a declared
+    state variable; an unbound descriptor (no `__set_name__` ran) or an
+    unknown name raises immediately.
     """
     if isinstance(ref, StateVar):
-        assert ref.name is not None
+        if ref.name is None:
+            raise TypeMismatch(
+                "prev() called on an unbound StateVar (no __set_name__ ran). "
+                "Did you forget to put it inside a class body?"
+            )
         return get_prev_var(ref.name)
     if isinstance(ref, str):
         return get_prev_var(ref)
@@ -128,8 +232,16 @@ def obj(cls):
     A Cell's color may be a ``Callable[[ObjectInstance], str]`` so the
     rendered color can depend on field values (Game of Life's Particle).
     """
-    annotations = cls.__dict__.get("__annotations__") or {}
-    field_names = tuple(annotations.keys())
+    # `from __future__ import annotations` may have stringified the
+    # annotations; resolve them to real types via the class's namespace.
+    raw_annotations = cls.__dict__.get("__annotations__") or {}
+    field_names = tuple(raw_annotations.keys())
+    try:
+        annotations = typing.get_type_hints(cls)
+    except Exception:
+        # Fallback: use the raw values (may be strings; _check_type will
+        # then no-op on them, which preserves backward compatibility).
+        annotations = raw_annotations
 
     cell_attr = cls.__dict__.get("cell")
     cells_attr = cls.__dict__.get("cells")
@@ -157,6 +269,12 @@ def obj(cls):
             raise TypeError(
                 f"{cls.__name__}: final argument must be a Position, "
                 f"got {type(origin).__name__}"
+            )
+        # Type-check each declared field against its annotation.
+        for fname, fval in zip(field_names, field_vals):
+            _check_type(
+                fval, annotations[fname],
+                context=f"@obj {cls.__name__}.{fname}",
             )
         fields = dict(zip(field_names, field_vals))
         return ObjectInstance(
@@ -215,7 +333,7 @@ def program(**config):
 
     def decorator(cls):
         spec = ProgramSpec(config=dict(config))
-        for name, val in list(cls.__dict__.items()):
+        for _name, val in list(cls.__dict__.items()):
             if isinstance(val, StateVar):
                 spec.state_vars.append(val)
             elif hasattr(val, "__autumn_obj_spec__"):

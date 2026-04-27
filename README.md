@@ -116,6 +116,15 @@ Next-expressions run afterwards in declaration order; a next-expr may
 legitimately `set_var` on sibling state vars (Autumn's `(=)` is an expression),
 and those writes go straight through without populating the skip set.
 
+The structural list combinators are effects too: `map_op`, `filter_op`,
+`concat_op`, and `adjPositions_op` are `@defop`s, and the Autumn-level
+`addObj` / `removeObj` / `updateObj` are plain Python compositions of them.
+That keeps the kernel small — `TypeOfHandler` and any future symbolic /
+reduction handler only need to interpret the combinators, not every
+Autumn-named primitive — and lines up with §6.1.1 of the PL writeup
+(MAP-DECOMP / FILTER-DECOMP / ADD-DECOMP), where the inference pipeline
+decomposes the higher-level list rules into the same kernel.
+
 ## What's ported
 
 Six envs from [Autumn.cpp/tests/](https://github.com/BasisResearch/Autumn.cpp/tree/main/tests)
@@ -165,12 +174,24 @@ tests/                 47 tests covering laws + per-env smoke
   not in the critical path and no test depends on it.
 - **No symbolic / trace / replay modes wired up yet.** The `NotHandled`
   discipline keeps that door open; stubs in `modes.py` will fill in.
-- **No type checker.** Autumn's `(: x T)` annotations are parsed-and-ignored
-  in the upstream C++ too.
+- **Lightweight type checker.** We enforce Autumn's `(: x T)` annotations
+  along the load-bearing axes of §2 of the PL writeup:
+  - **State-var init values, `@obj` field values, initializer + next-expression return values** — runtime isinstance checks.
+  - **Parameterised lists (`list[T]`)** — element-wise checked.
+  - **`@obj` classes** — instance must match the declared factory's spec.
+  - **`@on` predicate** — must return `bool`, not just truthy.
+  - **Cell color closures** — must return `str` at render time.
+  - **`@.next` / `@.initializer` function return annotations** — checked at decoration time against the StateVar's type.
+  - **`prev()` on an unbound StateVar** — raises immediately rather than later through a confusing `NameError`.
+
+  `object` annotations remain permissive (universal). Higher-order generics beyond `list[T]` pass through. `uniformChoice`'s parametric return type is the one substantive remaining gap — it would need true type-inference. See `autumn_py/api.py::_check_type` and `tests/test_type_checker.py`.
 
 ## Credits
 
+- Ria Das's original Autumn language and reference implementations:
+  [riadas/Autumn.jl](https://github.com/riadas/Autumn.jl) (Julia) and
+  [riadas/Autumn.js](https://github.com/riadas/Autumn.js) (JavaScript).
 - [BasisResearch/Autumn.cpp](https://github.com/BasisResearch/Autumn.cpp) —
-  the upstream interpreter and the example programs ported here.
+  the C++ reimplementation and the example programs ported here.
 - [BasisResearch/effectful](https://github.com/BasisResearch/effectful) —
   algebraic effects and handlers for Python.
