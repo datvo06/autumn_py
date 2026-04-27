@@ -5,7 +5,7 @@ from typing import Any
 
 from effectful.ops.semantics import handler
 
-from .api import ProgramSpec
+from .api import ProgramSpec, TypeMismatch, _check_type
 from .events import EVENT_NAMES
 from .handlers import (
     NativeRandomHandler,
@@ -75,7 +75,9 @@ class Runtime:
         with the full persistent handler stack already installed."""
         for sv in self.spec.state_vars:
             assert sv.name is not None
-            self.state.seed(sv.name, sv.initial_value())
+            value = sv.initial_value()
+            _check_type(value, sv.type_, context=f"initial value of state var {sv.name!r}")
+            self.state.seed(sv.name, value)
 
     def close(self) -> None:
         self._stack.close()
@@ -122,7 +124,18 @@ class Runtime:
                 with handler(write_buf):
                     for clause in self.spec.on_clauses:
                         pred = clause.predicate
-                        if (pred() if callable(pred) else pred):
+                        result = pred() if callable(pred) else pred
+                        # §2.3: on-clause predicates must be Bool. Coerce
+                        # bool subclasses (the event-sentinel __bool__'s
+                        # result is bool by definition; lambdas may return
+                        # non-bool truthy/falsy — reject those).
+                        if not isinstance(result, bool):
+                            raise TypeMismatch(
+                                f"on-clause predicate {clause.name!r} returned "
+                                f"{type(result).__name__} (value: {result!r}); "
+                                f"expected bool"
+                            )
+                        if result:
                             clause.body()
                 write_buf.flush(self.state)
 
@@ -138,7 +151,9 @@ class Runtime:
                     continue
                 if sv.name in self.state.on_writes_this_tick:
                     continue
-                self.state.commit_next(sv.name, sv._next_fn())
+                value = sv._next_fn()
+                _check_type(value, sv.type_, context=f"next-expression of state var {sv.name!r}")
+                self.state.commit_next(sv.name, value)
 
     def _drain_events(self) -> tuple[frozenset[str], tuple[int, int] | None]:
         active: set[str] = set()

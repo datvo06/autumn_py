@@ -61,3 +61,46 @@ def state_has(name: str) -> bool:
     """Return True iff the state var is defined and its value is truthy
     in Autumn's sense (ObjectInstance alive, or any non-None value)."""
     raise NotHandled
+
+
+# --------------------------------------------------------------------------
+# Structural list combinators as effects.
+#
+# Higher-level Autumn primitives (addObj, removeObj, updateObj) are written
+# as plain Python on top of these — handlers (TypeOfHandler today, future
+# symbolic / reduction handlers) only need to interpret the combinators.
+#
+# The defaults are standard list semantics; type-domain interpretations
+# preserve the list type, which is sound for Autumn's structural uses
+# (where the function's domain and codomain coincide).
+# --------------------------------------------------------------------------
+
+@defop
+def map_op(xs, fn):
+    """Map fn over xs. Default: standard Python map."""
+    return [fn(x) for x in xs]
+
+
+@defop
+def filter_op(xs, pred):
+    """Keep items of xs where pred(x) is truthy."""
+    return [x for x in xs if pred(x)]
+
+
+@defop
+def concat_op(xs, ys):
+    """xs ++ ys."""
+    return [*xs, *ys]
+
+
+@defop
+def adjPositions_op(p):
+    """Cardinal neighbours of position p as a list of Positions.
+    A list *constructor*, not a transformer — kept as its own op."""
+    from .values import Position
+    return [
+        Position(p.x + 1, p.y),
+        Position(p.x - 1, p.y),
+        Position(p.x, p.y + 1),
+        Position(p.x, p.y - 1),
+    ]

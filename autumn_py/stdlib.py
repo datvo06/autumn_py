@@ -8,20 +8,31 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable
 
-from .ops import all_objs, grid_size, sample_uniform, state_has
+from .ops import (
+    adjPositions_op,
+    all_objs,
+    concat_op,
+    filter_op,
+    grid_size,
+    map_op,
+    sample_uniform,
+    state_has,
+)
 from .values import ObjectInstance, Position
 
 
 # ---------------------------------------------------------------------------
-# Object-list helpers
+# Object-list helpers — composed from the structural combinators in ops.py
+# (concat_op / filter_op / map_op) so handlers only need to interpret the
+# combinators. Instance-form overloads stay direct.
 # ---------------------------------------------------------------------------
 
-def addObj(xs: list[ObjectInstance], obj_or_list) -> list[ObjectInstance]:
+def addObj(xs, obj_or_list):
     """Append to an object list. Second arg may be a single ObjectInstance or
     a list of them (matching Autumn's polymorphic addObj)."""
     if isinstance(obj_or_list, list):
-        return [*xs, *obj_or_list]
-    return [*xs, obj_or_list]
+        return concat_op(xs, obj_or_list)
+    return concat_op(xs, [obj_or_list])
 
 
 def removeObj(first, target=None):
@@ -32,14 +43,13 @@ def removeObj(first, target=None):
     * ``removeObj(list, predicate)`` → returns list with predicate-matching
       instances filtered out.
     """
-    if isinstance(first, ObjectInstance) and target is None:
-        return first.killed()
-    if isinstance(first, list):
-        if callable(target):
-            return [o for o in first if not target(o)]
-        if isinstance(target, ObjectInstance):
-            return [o for o in first if o.id != target.id]
-    raise TypeError(f"removeObj: unsupported arguments {type(first).__name__}, {type(target).__name__}")
+    if target is None:
+        if isinstance(first, ObjectInstance):
+            return first.killed()
+        raise TypeError(f"removeObj: missing target for {type(first).__name__}")
+    if callable(target):
+        return filter_op(first, lambda o: not target(o))
+    return filter_op(first, lambda o: getattr(o, "id", None) != target.id)
 
 
 def updateObj(first, *rest):
@@ -51,16 +61,14 @@ def updateObj(first, *rest):
     * ``updateObj(instance, field_name, value)`` → return instance with
       that field replaced.
     """
-    if isinstance(first, list):
-        fn = rest[0]
-        if len(rest) == 1:
-            return [fn(o) if o.alive else o for o in first]
-        pred = rest[1]
-        return [fn(o) if (o.alive and pred(o)) else o for o in first]
     if isinstance(first, ObjectInstance):
         name, value = rest
         return first.with_field(name, value)
-    raise TypeError(f"updateObj: unsupported first arg {type(first).__name__}")
+    fn = rest[0]
+    if len(rest) == 1:
+        return map_op(first, lambda o: fn(o) if o.alive else o)
+    pred = rest[1]
+    return map_op(first, lambda o: fn(o) if (o.alive and pred(o)) else o)
 
 
 def allObjs() -> list[ObjectInstance]:
@@ -90,13 +98,9 @@ def randomPositions(n_or_grid, count: int | None = None) -> list[Position]:
     return [sample_uniform(tuple(positions)) for _ in range(count)]
 
 
-def adjPositions(p: Position) -> list[Position]:
-    return [
-        Position(p.x + 1, p.y),
-        Position(p.x - 1, p.y),
-        Position(p.x, p.y + 1),
-        Position(p.x, p.y - 1),
-    ]
+def adjPositions(p):
+    """Cardinal neighbours of position p."""
+    return adjPositions_op(p)
 
 
 def displacement(p1: Position, p2: Position) -> Position:
@@ -299,8 +303,12 @@ def adjacentObjs(obj: ObjectInstance, unit_size: int) -> list[ObjectInstance]:
 # Functional helpers (direct translations of Autumn names for port fidelity)
 # ---------------------------------------------------------------------------
 
-def uniformChoice(xs: Iterable[Any]) -> Any:
-    return sample_uniform(tuple(xs))
+def uniformChoice(xs):
+    """Sample uniformly from `xs`. Dispatches to `sample_uniform`; under
+    TypeOfHandler this returns the element type (closes the §2.2 gap)."""
+    if isinstance(xs, (list, tuple)):
+        return sample_uniform(tuple(xs))
+    return sample_uniform(xs)
 
 
 def foldl(fn: Callable, init: Any, xs: Iterable) -> Any:
