@@ -30,14 +30,11 @@ behaves like a normal Python if/else.
 """
 from __future__ import annotations
 
-import ast
-import inspect
-import textwrap
 from typing import Any, Callable
 
 import z3
 from effectful.ops.semantics import handler
-from effectful.ops.syntax import ObjectInterpretation, defop, implements
+from effectful.ops.syntax import ObjectInterpretation, implements
 from effectful.ops.types import NotHandled
 
 from .ops import (
@@ -45,26 +42,11 @@ from .ops import (
     get_click_pos,
     get_prev_var,
     get_var,
+    if_then_else,
     is_event_active,
     sample_uniform,
     set_var,
 )
-
-
-# --------------------------------------------------------------------------
-# Symbolic conditional — the one op we add for symbolic-mode authoring
-# --------------------------------------------------------------------------
-
-@defop
-def if_then_else(cond, then_branch, else_branch):
-    """Three-way op for symbolic conditionals.
-
-    Under ground execution: behaves like Python ``then_branch if cond else else_branch``.
-    Under ``SmtCollectHandler``: lowers to ``z3.If(cond, then_branch, else_branch)``.
-    """
-    if cond:
-        return then_branch
-    return else_branch
 
 
 # --------------------------------------------------------------------------
@@ -102,6 +84,7 @@ class SmtCollectHandler(ObjectInterpretation):
         *,
         tick_name: str = "t",
         tick_value: int | z3.ExprRef | None = None,
+        auto_declare: bool = False,
     ) -> None:
         """`tick_value=None` makes the handler's tick a fresh symbolic Z3
         Int (later universally quantified by `lifted_constraints()`).
@@ -109,7 +92,14 @@ class SmtCollectHandler(ObjectInterpretation):
         each `set_var` then records an *instantiated* transition at that
         tick, no quantifier needed. Bounded model checking unrolls the
         recurrence by calling collect_smt repeatedly with `tick_value` in
-        a range — useful when ForAll-over-Int problems are undecidable."""
+        a range — useful when ForAll-over-Int problems are undecidable.
+
+        `auto_declare`: when True, ``get_var``/``set_var``/``get_prev_var``
+        on an undeclared state var register it as ``Int``-typed on the fly
+        instead of raising. Used by ``read_set`` (footprint analysis only
+        cares about atoms, not types). Off by default so SMT extraction
+        complains loudly about typos.
+        """
         self.specs = dict(state_var_specs)
         self.state_funcs: dict[str, z3.FuncDeclRef] = {
             name: z3.Function(name, z3.IntSort(), _z3_sort(ty))
@@ -117,39 +107,61 @@ class SmtCollectHandler(ObjectInterpretation):
         }
         self.t = z3.Int(tick_name) if tick_value is None else tick_value
         self._symbolic_tick = tick_value is None
+        self._auto_declare = auto_declare
         self.transitions: list[z3.BoolRef] = []
         self.globals: list[z3.BoolRef] = []
         self.existentials: list[z3.ExprRef] = []
+        # Atom-set tracking: every op invocation appends the corresponding
+        # syntactic atom. Used by `read_set` and the FootprintChecker.
+        self.atoms: set[tuple] = set()
         self._fresh_idx = 0
+
+    def _ensure_state_func(self, name: str, default_type: type = int) -> z3.FuncDeclRef:
+        """Return the Z3 function for `name`, auto-declaring it if
+        ``auto_declare`` was set. Raises if neither found nor auto-declared."""
+        if name in self.state_funcs:
+            return self.state_funcs[name]
+        if self._auto_declare:
+            f = z3.Function(name, z3.IntSort(), _z3_sort(default_type))
+            self.state_funcs[name] = f
+            self.specs[name] = default_type
+            return f
+        raise ValueError(
+            f"set_var on undeclared state var {name!r}; "
+            f"add it to state_var_specs (or pass auto_declare=True)"
+        )
 
     # -- core state ops ---------------------------------------------------
 
     @implements(get_var)
     def _get_var(self, name: str):
+        self.atoms.add(("get_var", name, 0))
         if name in self.state_funcs:
             return self.state_funcs[name](self.t)
+        if self._auto_declare:
+            return self._ensure_state_func(name)(self.t)
         return self._fresh_existential(name, int)
 
     @implements(get_prev_var)
     def _get_prev_var(self, name: str):
+        self.atoms.add(("get_var", name, -1))
         if name in self.state_funcs:
             return self.state_funcs[name](self.t - 1)
+        if self._auto_declare:
+            return self._ensure_state_func(name)(self.t - 1)
         return self._fresh_existential(name, int)
 
     @implements(set_var)
     def _set_var(self, name: str, value: Any) -> None:
-        if name not in self.state_funcs:
-            raise ValueError(
-                f"set_var on undeclared state var {name!r}; "
-                f"add it to state_var_specs"
-            )
-        f = self.state_funcs[name]
+        self.atoms.add(("set_var", name))
+        f = self._ensure_state_func(name)
         self.transitions.append(f(self.t + 1) == value)
 
     # -- stochasticity & identifiers --------------------------------------
 
     @implements(sample_uniform)
     def _sample(self, xs: Any):
+        self.atoms.add(("sample_uniform",))
         e = z3.Int(f"rng_{self._fresh_idx}")
         self._fresh_idx += 1
         self.existentials.append(e)
@@ -163,16 +175,19 @@ class SmtCollectHandler(ObjectInterpretation):
 
     @implements(alloc_obj_id)
     def _alloc(self):
+        self.atoms.add(("alloc_obj_id",))
         return self._fresh_existential("obj_id", int)
 
     # -- environment & events --------------------------------------------
 
     @implements(is_event_active)
     def _event(self, name: str):
+        self.atoms.add(("is_event_active", name))
         return z3.Bool(f"event_{name}_t")
 
     @implements(get_click_pos)
     def _click(self):
+        self.atoms.add(("get_click_pos",))
         x = z3.Int("click_x_t")
         y = z3.Int("click_y_t")
         return (x, y)
@@ -224,6 +239,42 @@ class SmtCollectHandler(ObjectInterpretation):
 # --------------------------------------------------------------------------
 # Public API
 # --------------------------------------------------------------------------
+
+def read_set(
+    fn: Callable[[], Any],
+    state_var_specs: dict[str, type] | None = None,
+) -> frozenset[tuple]:
+    """Compute the read-set (set of syntactic atoms) of a callable.
+
+    Atoms are tuples of the form ``(op_name, *args)``:
+
+    * ``("get_var", name, 0)`` — read of state var ``name`` at the current tick.
+    * ``("get_var", name, -1)`` — read of state var ``name`` at the previous tick.
+    * ``("set_var", name)`` — write to state var ``name``.
+    * ``("sample_uniform",)`` — stochastic draw.
+    * ``("is_event_active", event_name)`` — event-activation read.
+
+    Implementation: run ``fn`` under ``SmtCollectHandler`` and harvest its
+    ``atoms`` accumulator. Side-effecting ops still append their atoms even
+    if the resulting Z3 expression is discarded, so this function gives a
+    sound over-approximation of the lambda's syntactic dependencies.
+
+    `state_var_specs` defaults to an empty dict — undeclared names get
+    fresh existentials, which is fine for footprint analysis since we only
+    care about which atoms appear, not their types.
+    """
+    h = SmtCollectHandler(state_var_specs or {}, auto_declare=True)
+    with handler(h):
+        try:
+            fn()
+        except NotHandled:
+            # An op fired with no concrete-domain handler installed; the
+            # atom was already recorded before the exception, so the
+            # footprint is intact. Other exceptions propagate — those
+            # signal genuine bugs the caller should see.
+            pass
+    return frozenset(h.atoms)
+
 
 def collect_smt(
     fn: Callable[[], Any],
@@ -316,132 +367,3 @@ def to_smt_lib(
     return s.to_smt2()
 
 
-# --------------------------------------------------------------------------
-# @symbolic — AST source-rewriting decorator for native if/else
-# --------------------------------------------------------------------------
-
-class _SymbolicIfRewriter(ast.NodeTransformer):
-    """Rewrites Python's `if/else` statements and `a if c else b` ternaries
-    into explicit `if_then_else` calls so the resulting function works
-    under `SmtCollectHandler`.
-
-    Supported patterns (raises `SyntaxError` otherwise):
-
-    * **Ternary `IfExp`**: ``x = a if cond else b`` →
-      ``x = if_then_else(cond, a, b)``.
-    * **Assignment-form `If`**: ``if cond: x = a; else: x = b`` →
-      ``x = if_then_else(cond, a, b)``. Both branches must assign to the
-      same target.
-    * **Same-callable `If`**: ``if cond: f(args1); else: f(args2)`` →
-      ``f(args')`` where each differing argument position is wrapped in
-      ``if_then_else(cond, args1[i], args2[i])``. Function callable and
-      arity must match.
-
-    Asymmetric branches, early returns inside branches, and structurally
-    different bodies are unsupported and raise a clear `SyntaxError` with
-    the offending line number.
-    """
-
-    def visit_IfExp(self, node: ast.IfExp) -> ast.AST:
-        self.generic_visit(node)
-        return ast.Call(
-            func=ast.Name(id="if_then_else", ctx=ast.Load()),
-            args=[node.test, node.body, node.orelse],
-            keywords=[],
-        )
-
-    def visit_If(self, node: ast.If) -> ast.AST:
-        self.generic_visit(node)
-        if len(node.body) != 1 or len(node.orelse) != 1:
-            self._fail(node, "both branches must be a single statement")
-        b, o = node.body[0], node.orelse[0]
-        if isinstance(b, ast.Assign) and isinstance(o, ast.Assign):
-            if ast.dump(b.targets[0]) != ast.dump(o.targets[0]) or len(b.targets) != 1 or len(o.targets) != 1:
-                self._fail(node, "both branches must assign to the same single target")
-            return ast.Assign(
-                targets=[b.targets[0]],
-                value=ast.Call(
-                    func=ast.Name(id="if_then_else", ctx=ast.Load()),
-                    args=[node.test, b.value, o.value],
-                    keywords=[],
-                ),
-            )
-        if isinstance(b, ast.Expr) and isinstance(o, ast.Expr) and \
-                isinstance(b.value, ast.Call) and isinstance(o.value, ast.Call):
-            bc, oc = b.value, o.value
-            if ast.dump(bc.func) != ast.dump(oc.func):
-                self._fail(node, "branches call different callables")
-            if len(bc.args) != len(oc.args):
-                self._fail(node, "branches call with different arity")
-            if [ast.dump(k) for k in bc.keywords] != [ast.dump(k) for k in oc.keywords]:
-                self._fail(node, "branches call with different keyword arguments")
-            new_args = []
-            for i, (ba, oa) in enumerate(zip(bc.args, oc.args)):
-                if ast.dump(ba) == ast.dump(oa):
-                    new_args.append(ba)
-                else:
-                    # Differing string-literal args usually mean the two
-                    # branches name *different state variables*, which
-                    # cannot be made conditional sensibly; reject.
-                    if isinstance(ba, ast.Constant) and isinstance(ba.value, str):
-                        self._fail(node, f"argument {i} is a differing string "
-                                          f"literal — cannot lift to if_then_else")
-                    if isinstance(oa, ast.Constant) and isinstance(oa.value, str):
-                        self._fail(node, f"argument {i} is a differing string "
-                                          f"literal — cannot lift to if_then_else")
-                    new_args.append(ast.Call(
-                        func=ast.Name(id="if_then_else", ctx=ast.Load()),
-                        args=[node.test, ba, oa],
-                        keywords=[],
-                    ))
-            return ast.Expr(value=ast.Call(
-                func=bc.func, args=new_args, keywords=bc.keywords,
-            ))
-        self._fail(node, "branches must both be assignments to the same target, "
-                          "or both expression-statements calling the same function")
-
-    @staticmethod
-    def _fail(node: ast.If, reason: str) -> None:
-        raise SyntaxError(
-            f"@symbolic cannot rewrite this if/else (line {node.lineno}): {reason}. "
-            f"Supported patterns: (a) `if cond: x = e1; else: x = e2`, "
-            f"(b) `if cond: f(...); else: f(...)` with same callable and arity, "
-            f"(c) `x = e1 if cond else e2`. "
-            f"For other cases, use `if_then_else(cond, e1, e2)` explicitly."
-        )
-
-
-def symbolic(fn: Callable) -> Callable:
-    """Decorator that rewrites `if/else` and `a if c else b` in `fn`'s body
-    into explicit `if_then_else` calls, so `fn` works under `SmtCollectHandler`
-    *and* under ground execution (the rewrite preserves observable semantics
-    when both branches are pure-expression-shaped).
-
-    Restrictions
-    ------------
-    The function's source must be retrievable via `inspect.getsource` —
-    works for file-defined functions, fails on lambdas without source.
-    See `_SymbolicIfRewriter` for the supported `if`/`else` shapes; other
-    shapes raise `SyntaxError` at decoration time, which is the loud-failure
-    signal an LLM-emit pipeline should consume as a residual.
-    """
-    src = textwrap.dedent(inspect.getsource(fn))
-    tree = ast.parse(src)
-    new_tree = _SymbolicIfRewriter().visit(tree)
-
-    # Strip @symbolic from the rewritten function to avoid infinite recursion
-    fn_def = new_tree.body[0]
-    if isinstance(fn_def, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        fn_def.decorator_list = [
-            d for d in fn_def.decorator_list
-            if not (isinstance(d, ast.Name) and d.id == "symbolic")
-            and not (isinstance(d, ast.Attribute) and d.attr == "symbolic")
-        ]
-
-    ast.fix_missing_locations(new_tree)
-    code = compile(new_tree, fn.__code__.co_filename, "exec")
-
-    ns = dict(fn.__globals__)
-    ns["if_then_else"] = if_then_else
-    exec(code, ns)
-    return ns[fn.__name__]

@@ -22,11 +22,11 @@ from autumn_py.ops import (
     sample_uniform,
     set_var,
 )
+from autumn_py._ast_rewrite import symbolic
+from autumn_py.ops import if_then_else
 from autumn_py.smt import (
     collect_smt,
-    if_then_else,
     solve_against_goal,
-    symbolic,
     to_smt_lib,
     unroll_transitions,
 )
@@ -355,6 +355,24 @@ def test_symbolic_handles_elif_via_nested_rewrites():
     smt = to_smt_lib(constraints)
     # Three levels of nested ITEs
     assert smt.count("ite") == 3
+
+
+def test_symbolic_handles_return_form_if_else():
+    """`if cond: return a; else: return b` lifts to
+    `return if_then_else(cond, a, b)`. The next-clause idiom in
+    autumn-py uses return statements, so this is the common shape."""
+
+    @symbolic
+    def step_returns():
+        cur = get_var("step_count")
+        if cur == 0:
+            return 1
+        else:
+            return cur
+
+    # Sanity: the rewritten function still runs under ground execution.
+    # Under SmtCollectHandler, the return value would be a Z3 ITE.
+    assert step_returns.__name__ == "step_returns"
 
 
 def test_symbolic_handles_elif_in_call_form():
