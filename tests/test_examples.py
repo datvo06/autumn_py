@@ -267,3 +267,49 @@ def test_sand_click_on_free_cell_adds_a_grain_of_selected_type():
         r.step()
         after = len(_cells_by_color(r.render_all(), "tan"))
     assert after == before + 1
+
+
+# -------------------------------------------------------------------------
+# Space Invaders (R2 fixed — the converged emit; see drafts/...handlers... Part 1)
+# -------------------------------------------------------------------------
+
+def test_space_invaders_r2_fixed_starts_with_player_and_12_enemy_formation():
+    from examples.space_invaders import SpaceInvadersR2Fixed
+    with Runtime(SpaceInvadersR2Fixed, seed=42) as r:
+        cells = r.render_all()
+    assert len(_cells_by_color(cells, "blue")) == 1     # player
+    assert len(_cells_by_color(cells, "red")) == 12     # 3 rows × 4 cols
+    assert len(_cells_by_color(cells, "yellow")) == 0   # no enemy bullets yet
+    assert len(_cells_by_color(cells, "lightgreen")) == 0
+
+
+def test_space_invaders_r2_fixed_spawns_an_enemy_bullet_after_step_3():
+    """At t=3 step_count == next_spawn_step == 3; spawn_event becomes True
+    at end of tick. enemy_bullets reads prev(spawn_event), so the bullet
+    appears at tick 4."""
+    from examples.space_invaders import SpaceInvadersR2Fixed
+    with Runtime(SpaceInvadersR2Fixed, seed=42) as r:
+        for _ in range(5):
+            r.step()
+        cells = r.render_all()
+    # By tick 5 we should have at least one enemy bullet on screen.
+    assert len(_cells_by_color(cells, "yellow")) >= 1
+
+
+def test_space_invaders_r2_fixed_player_moves_left_under_left_arrow():
+    from examples.space_invaders import SpaceInvadersR2Fixed
+    with Runtime(SpaceInvadersR2Fixed, seed=42) as r:
+        before = _cells_by_color(r.render_all(), "blue")[0]
+        r.left()
+        r.step()
+        after = _cells_by_color(r.render_all(), "blue")[0]
+    assert after["x"] == before["x"] - 1
+
+
+def test_space_invaders_r2_fixed_click_fires_player_bullet():
+    from examples.space_invaders import SpaceInvadersR2Fixed
+    with Runtime(SpaceInvadersR2Fixed, seed=42) as r:
+        r.click(8, 14)   # at the player's position
+        r.step()
+        cells = r.render_all()
+    assert len(_cells_by_color(cells, "lightgreen")) >= 1
