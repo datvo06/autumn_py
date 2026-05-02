@@ -1,24 +1,18 @@
 from __future__ import annotations
 
 import typing
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from dataclasses import MISSING, dataclass
+from dataclasses import field as field
+from typing import Any, Callable, Generic, TypeVar, dataclass_transform
 
 from .ops import alloc_obj_id, get_prev_var, get_var, set_var
 from .values import Cell, ObjectClassSpec, ObjectInstance, Position
 
+T = TypeVar("T")
+
 
 # --------------------------------------------------------------------------
 # Lightweight runtime type checker.
-#
-# Autumn's surface syntax includes (: x T) annotations. The C++ interpreter
-# parses and ignores them; we don't. The checker validates state-var init
-# values, @obj field values, initializer return types, and next-expression
-# return types against their declared annotations.
-#
-# It is intentionally lightweight: isinstance for ground types, list-only
-# for list[...] (no element-type check), special-cased ObjectInstance for
-# user-declared object classes, and `object` as a permissive escape hatch.
 # --------------------------------------------------------------------------
 
 class TypeMismatch(TypeError):
@@ -26,17 +20,10 @@ class TypeMismatch(TypeError):
 
 
 def _check_type(value: Any, expected: Any, context: str) -> None:
-    """Verify that ``value`` is compatible with the declared type ``expected``.
-
-    Raises ``TypeMismatch`` on failure. Does nothing when ``expected`` is
-    ``None`` (no annotation) or ``object`` (universal).
-    """
+    """Verify that ``value`` is compatible with the declared type ``expected``."""
     if expected is None or expected is object or expected is Any:
         return
 
-    # Parameterised generics: list[T], tuple[T], etc. We handle list[T] (and
-    # typing.List[T]) by checking the container kind and recursively
-    # checking each element's type. Other generics fall through.
     origin = typing.get_origin(expected)
     if origin is list:
         if not isinstance(value, list):
@@ -50,8 +37,6 @@ def _check_type(value: Any, expected: Any, context: str) -> None:
                 _check_type(elem, elem_type, f"{context}[{i}]")
         return
 
-    # @obj-decorated factories carry their spec; treat them as object-class
-    # annotations: the value must be an ObjectInstance of that spec.
     obj_spec = getattr(expected, "__autumn_obj_spec__", None)
     if obj_spec is not None:
         if isinstance(value, ObjectInstance) and value.cls is obj_spec:
@@ -61,13 +46,9 @@ def _check_type(value: Any, expected: Any, context: str) -> None:
             f"got {type(value).__name__}"
         )
 
-    # Plain Python types — list, int, bool, str, dict, ObjectInstance,
-    # Position, Cell, ...
     if isinstance(expected, type):
         if isinstance(value, expected):
             return
-        # Permit None as a placeholder for object-valued state vars whose
-        # initializer hasn't run yet.
         if value is None and expected in (object,):
             return
         raise TypeMismatch(
@@ -75,12 +56,124 @@ def _check_type(value: Any, expected: Any, context: str) -> None:
             f"got {type(value).__name__} (value: {value!r})"
         )
 
-    # Anything else — pass through; we don't enforce more elaborate generics.
-
 
 # --------------------------------------------------------------------------
-# Program-spec record attached to a @program-decorated class.
+# Spec records attached to a @program-decorated class.
 # --------------------------------------------------------------------------
+
+class StateVar(Generic[T]):
+    """Spec record for a state-variable declaration, generic in the
+    value type ``T``.
+
+    Two construction paths, both supported:
+
+    * **Annotation form (preferred for synth-emit; LLM-natural; mypy-clean):**
+
+        @program(grid_size=16)
+        class MyGame:
+            step_count: StateVar[int] = 0
+            enemies: StateVar[list] = field(default_factory=list)
+
+        @program walks ``cls.__annotations__`` and ``cls.__dict__`` to
+        mint StateVar entries. The annotation ``StateVar[T]`` tells the
+        type-checker that the post-decoration class attribute is a
+        ``StateVar[T]`` (not the bare default's type), so ``.get()``,
+        ``.set(v)``, and ``prev(MyGame.x)`` all type-check correctly.
+        Next-clauses are registered via ``@next_clause("name") def _():``.
+
+    * **Legacy descriptor form (kept for compatibility):**
+
+        @program(grid_size=16)
+        class MyGame:
+            step_count = StateVar(int, init=0)
+
+            @step_count.next
+            def _():
+                return prev(MyGame.step_count) + 1
+
+        StateVar instances in the class body are descriptors with
+        ``.next`` and ``.initializer`` decorator methods.
+
+    The two forms produce identical internal spec records; the runtime
+    iterates them the same way. The annotation form is preferred —
+    it's the syntax LLMs are saturated on (``@dataclass``, ``@attrs``,
+    Pydantic) and avoids the autumn-specific wrapper class.
+    """
+
+    def __init__(
+        self,
+        type_: type[T] | None = None,
+        *,
+        init: T | None = None,
+        init_fn: Callable[[], T] | None = None,
+        name: str | None = None,
+    ) -> None:
+        self.type_ = type_
+        self.init = init
+        self.init_fn = init_fn
+        self.name = name
+        self._next_fn: Callable[[], Any] | None = None
+
+    def __set_name__(self, owner, name: str) -> None:
+        # Legacy descriptor form: capture name from class-attribute binding.
+        if self.name is None:
+            self.name = name
+
+    def __class_getitem__(cls, item):
+        # Permit ``StateVar[int]`` as an annotation. Returns a generic alias
+        # so type-checkers can carry the parameter through; at runtime the
+        # alias is callable (returns this class) for `isinstance` checks.
+        return typing._GenericAlias(cls, (item,))  # type: ignore[attr-defined]
+
+    def __repr__(self) -> str:
+        return f"StateVar({self.name!r})"
+
+    def initial_value(self) -> Any:
+        if self.init_fn is not None:
+            return self.init_fn()
+        return self.init
+
+    # --- legacy descriptor decorator methods (for backward compat) -------
+
+    def get(self) -> T:
+        assert self.name is not None
+        return get_var(self.name)
+
+    def set(self, value: T) -> None:
+        assert self.name is not None
+        set_var(self.name, value)
+
+    def next(self, fn: Callable[[], Any]) -> Callable[[], Any]:
+        """Legacy: ``@<sv>.next def _(): ...``. Modern equivalent is
+        ``@next_clause("<name>") def _(): ...``."""
+        _check_next_return_annotation(fn, self)
+        self._next_fn = fn
+        return fn
+
+    def initializer(self, fn: Callable[[], Any]) -> Callable[[], Any]:
+        """Legacy: ``@<sv>.initializer def _(): ...``. Modern equivalent
+        is ``field(default_factory=fn)`` in the class body."""
+        if self.type_ is not None and self.type_ is not object:
+            hints: dict = {}
+            try:
+                hints = typing.get_type_hints(fn)
+            except (TypeError, NameError):
+                hints = {}
+            ret = hints.get("return")
+            if ret is not None and ret is not object and ret is not Any \
+                    and ret is not self.type_:
+                sv_origin = typing.get_origin(self.type_)
+                ret_origin = typing.get_origin(ret)
+                if not (sv_origin is not None and sv_origin is ret_origin):
+                    raise TypeMismatch(
+                        f"initializer for state var {self.name!r}: "
+                        f"function return type {getattr(ret, '__name__', ret)!r} "
+                        f"does not match declared type "
+                        f"{getattr(self.type_, '__name__', self.type_)!r}"
+                    )
+        self.init_fn = fn
+        return fn
+
 
 @dataclass
 class OnClause:
@@ -91,112 +184,24 @@ class OnClause:
 
 @dataclass
 class ProgramSpec:
-    state_vars: list["StateVar"] = field(default_factory=list)
-    on_clauses: list[OnClause] = field(default_factory=list)
-    obj_classes: list[Any] = field(default_factory=list)
-    config: dict = field(default_factory=dict)
+    state_vars: list[StateVar]
+    on_clauses: list[OnClause]
+    obj_classes: list[Any]
+    config: dict
 
 
 # --------------------------------------------------------------------------
-# StateVar: a descriptor that represents a named piece of per-tick state.
+# prev() — read previous-tick value of a state var
 # --------------------------------------------------------------------------
-
-class StateVar:
-    """Descriptor bound to a class attribute, representing a named Autumn state var.
-
-    Usage inside a @program class::
-
-        foo = StateVar(list, init=[])
-
-        @foo.next
-        def _():
-            return ...   # expression producing foo's next-tick value
-
-        # For initial values that require handler-backed effects
-        # (e.g. constructing an ObjectInstance, which calls alloc_obj_id):
-
-        bar = StateVar(object)
-
-        @bar.initializer
-        def _():
-            return Mario(0, Position(7, 15))
-    """
-
-    def __init__(self, type_: type | None = None, *, init: Any = None) -> None:
-        self.type_ = type_
-        self.init = init
-        self.name: str | None = None
-        self._next_fn: Callable[[], Any] | None = None
-        self._init_fn: Callable[[], Any] | None = None
-
-    def __set_name__(self, owner, name: str) -> None:
-        self.name = name
-
-    def __repr__(self) -> str:
-        return f"StateVar({self.name!r})"
-
-    def get(self) -> Any:
-        assert self.name is not None
-        return get_var(self.name)
-
-    def set(self, value: Any) -> None:
-        assert self.name is not None
-        set_var(self.name, value)
-
-    def next(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """Register the decorated function as this var's initnext-next expression."""
-        self._check_return_annotation(fn, "next-expression")
-        self._next_fn = fn
-        return fn
-
-    def initializer(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """Register a zero-arg function producing this var's initial value.
-        Invoked by the Runtime's init phase under the persistent handler stack,
-        so it may call effects like alloc_obj_id (ObjectInstance construction).
-        Takes precedence over ``init=`` when both are set."""
-        self._check_return_annotation(fn, "initializer")
-        self._init_fn = fn
-        return fn
-
-    def initial_value(self) -> Any:
-        """Resolve the init value at init-phase time. Prefers the initializer
-        callable if one was registered; falls back to the static ``init=``."""
-        return self._init_fn() if self._init_fn is not None else self.init
-
-    def _check_return_annotation(self, fn: Callable, kind: str) -> None:
-        """If the registered function has a return annotation that conflicts
-        with this StateVar's declared type, raise at decoration time."""
-        if self.type_ is None or self.type_ is object:
-            return
-        try:
-            hints = typing.get_type_hints(fn)
-        except Exception:
-            return
-        ret = hints.get("return")
-        if ret is None or ret is object or ret is Any:
-            return
-        # Compatible iff same type, or matching parameterised list[T] origin.
-        if ret is self.type_:
-            return
-        sv_origin = typing.get_origin(self.type_)
-        ret_origin = typing.get_origin(ret)
-        if sv_origin is not None and sv_origin is ret_origin:
-            return
-        raise TypeMismatch(
-            f"{kind} for state var {self.name!r}: function return type "
-            f"{getattr(ret, '__name__', ret)!r} does not match "
-            f"declared type {getattr(self.type_, '__name__', self.type_)!r}"
-        )
-
 
 def prev(ref) -> Any:
     """Read the previous-tick value of a state var.
 
-    `ref` can be either the StateVar descriptor (preferred, identity-based) or
-    a raw attribute name. §2.2: requires the referent to be a declared
-    state variable; an unbound descriptor (no `__set_name__` ran) or an
-    unknown name raises immediately.
+    `ref` may be: (a) a string name, (b) a `StateVar` spec record (the
+    object `@program` mints — typically accessed as ``MyProgram.x``).
     """
+    if isinstance(ref, str):
+        return get_prev_var(ref)
     if isinstance(ref, StateVar):
         if ref.name is None:
             raise TypeMismatch(
@@ -204,16 +209,92 @@ def prev(ref) -> Any:
                 "Did you forget to put it inside a class body?"
             )
         return get_prev_var(ref.name)
-    if isinstance(ref, str):
-        return get_prev_var(ref)
-    raise TypeError(f"prev() expects a StateVar or str, got {type(ref).__name__}")
+    raise TypeError(f"prev() expects a str or StateVar, got {type(ref).__name__}")
+
+
+# --------------------------------------------------------------------------
+# next_clause: decorator to register a state var's next-expression
+# --------------------------------------------------------------------------
+
+_pending_next_clauses: list[tuple[str, Callable[[], Any]]] = []
+
+
+def next_clause(name: str):
+    """Register the decorated function as the next-expression for the
+    state variable named ``name``. The decorator records the (name, fn)
+    pair on a module-level pending list which ``@program`` drains when
+    the class body finishes executing.
+
+    Usage::
+
+        @program(grid_size=16)
+        class MyGame:
+            step_count: int = 0
+
+            @next_clause("step_count")
+            def _():
+                return prev("step_count") + 1
+    """
+
+    def decorator(fn: Callable[[], Any]) -> Callable[[], Any]:
+        _pending_next_clauses.append((name, fn))
+        return fn
+
+    return decorator
+
+
+# --------------------------------------------------------------------------
+# @on: register an on-clause.
+# --------------------------------------------------------------------------
+
+_pending_on_clauses: list["OnClause"] = []
+
+
+def on(predicate):
+    """Decorate a 0-arg function to register it as an on-clause body."""
+
+    def decorator(fn: Callable[[], Any]) -> Callable[[], Any]:
+        fn.__autumn_on_pred__ = predicate  # type: ignore[attr-defined]
+        _pending_on_clauses.append(
+            OnClause(predicate=predicate, body=fn, name=getattr(fn, "__name__", "_"))
+        )
+        return fn
+
+    return decorator
 
 
 # --------------------------------------------------------------------------
 # @obj: decorate a class to turn it into an Autumn object factory.
 # --------------------------------------------------------------------------
 
-def obj(cls):
+class AutumnObj:
+    """Base class for ``@obj``-decorated classes. Inherit from this so that
+    type-checkers (mypy / Pyright) understand the factory signature.
+
+    Mypy has a known limitation (issue #3135): class decorators that return
+    non-class objects (like ``@obj``, which returns a factory function)
+    lose call-type information. Mypy reports ``Too many arguments`` when
+    you write ``Player(Position(8, 14))`` because it sees the bare
+    ``class Player:`` (no ``__init__``) rather than the decorator's return.
+
+    Inheriting from ``AutumnObj`` provides:
+
+    * a flexible ``__new__(cls, *args, **kwargs) -> ObjectInstance`` stub
+      that mypy reads — so ``Player(Position(8, 14))`` is typed as
+      ``ObjectInstance`` (matching what the runtime factory actually returns),
+      which lets ``addObj``/``removeObj``/``updateObj`` overloads pick the
+      right variant.
+    * a permissive ``__init__`` matching ``__new__`` to satisfy mypy.
+
+    Neither stub runs at runtime: ``@obj`` replaces the class entirely with
+    a factory function that constructs ``ObjectInstance`` directly.
+    """
+    def __new__(cls, *args: object, **kwargs: object) -> "ObjectInstance":  # type: ignore[misc]
+        ...
+    def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+
+def obj(cls) -> Callable[..., ObjectInstance]:
     """Class decorator: registers an Autumn object class.
 
     The decorated class body may declare:
@@ -224,23 +305,16 @@ def obj(cls):
       named per-instance fields. Declaration order is the positional
       argument order for construction.
 
-    Returns a callable factory. The factory accepts positional args in
-    the order ``(*fields, origin)`` to mirror the Autumn s-expression
-    form ``(Mario 0 (Position 7 15))``. An ``ObjectInstance`` with a
-    fresh id is returned.
-
-    A Cell's color may be a ``Callable[[ObjectInstance], str]`` so the
-    rendered color can depend on field values (Game of Life's Particle).
+    Returns a callable factory ``(*fields, origin) -> ObjectInstance``.
+    The annotated return type tells type-checkers the factory accepts
+    any positional args (the actual signature is dynamic, derived from
+    the class's annotations).
     """
-    # `from __future__ import annotations` may have stringified the
-    # annotations; resolve them to real types via the class's namespace.
     raw_annotations = cls.__dict__.get("__annotations__") or {}
     field_names = tuple(raw_annotations.keys())
     try:
         annotations = typing.get_type_hints(cls)
     except Exception:
-        # Fallback: use the raw values (may be strings; _check_type will
-        # then no-op on them, which preserves backward compatibility).
         annotations = raw_annotations
 
     cell_attr = cls.__dict__.get("cell")
@@ -270,7 +344,6 @@ def obj(cls):
                 f"{cls.__name__}: final argument must be a Position, "
                 f"got {type(origin).__name__}"
             )
-        # Type-check each declared field against its annotation.
         for fname, fval in zip(field_names, field_vals):
             _check_type(
                 fval, annotations[fname],
@@ -288,59 +361,155 @@ def obj(cls):
 
 
 # --------------------------------------------------------------------------
-# @on: register an on-clause.
-# --------------------------------------------------------------------------
-#
-# Autumn programs typically declare many on-clauses. Users write them as
-# ``@on(pred) def _(): ...`` repeatedly and rely on shadowing not to matter.
-# To preserve all of them regardless of name, ``@on`` pushes each clause onto
-# a module-level pending list that ``@program`` drains when the class finishes
-# defining. Class bodies execute sequentially, so this works without threads
-# or metaclasses.
-
-_pending_on_clauses: list["OnClause"] = []
-
-
-def on(predicate):
-    """Decorate a 0-arg function to register it as an on-clause body.
-
-    Users may reuse the same Python name (e.g. ``def _()``) for every
-    on-clause; the registration bypasses ``cls.__dict__`` via an internal
-    pending list drained by ``@program``.
-    """
-
-    def decorator(fn: Callable[[], Any]) -> Callable[[], Any]:
-        fn.__autumn_on_pred__ = predicate  # type: ignore[attr-defined]
-        _pending_on_clauses.append(
-            OnClause(predicate=predicate, body=fn, name=getattr(fn, "__name__", "_"))
-        )
-        return fn
-
-    return decorator
-
-
-# --------------------------------------------------------------------------
-# @program: collect state vars, on-clauses, and object classes off a class.
+# @program: walks class-body annotations + defaults to build the spec.
 # --------------------------------------------------------------------------
 
+# Sentinel marker: if the class body has no default for an annotated state
+# var, we use this to indicate "must be supplied via @initializer (not yet
+# implemented in pure-defop mode)" — but for ordinary StateVar use, every
+# attribute has a default.
+_MISSING = object()
+
+
+@dataclass_transform(field_specifiers=(field,))
 def program(**config):
-    """Class decorator. Populates `cls._autumn_spec: ProgramSpec`.
+    """Class decorator. Reads class-body annotations + defaults to mint
+    state-var specs; drains pending @next_clause and @on registrations
+    into ``cls._autumn_spec``.
 
-    Drains the module-level on-clause pending list (everything that was
-    decorated with @on during this class body's execution) into
-    ``spec.on_clauses``.
+    The class body declares state vars as ordinary annotated attributes::
+
+        @program(grid_size=16)
+        class MyGame:
+            step_count: int = 0
+            enemies: list = field(default_factory=list)
+            player: Player = field(default_factory=lambda: Player(Position(8, 14)))
+
+    The ``field(default_factory=...)`` re-export from ``dataclasses``
+    handles the mutable-default and effect-requiring-init cases.
+
+    Next-clauses are registered by name (string anchor) since the class
+    attributes aren't descriptors anymore::
+
+        @next_clause("step_count")
+        def _():
+            return prev("step_count") + 1
     """
 
     def decorator(cls):
-        spec = ProgramSpec(config=dict(config))
-        for _name, val in list(cls.__dict__.items()):
+        try:
+            annotations = typing.get_type_hints(cls)
+        except Exception:
+            annotations = cls.__dict__.get("__annotations__") or {}
+
+        state_vars: list[StateVar] = []
+        seen_names: set[str] = set()
+
+        # Walk cls.__dict__ for StateVar instances (the only state-var
+        # declaration form we accept). Plain annotations like
+        # ``step_count: int = 0`` are *rejected* with a clear error —
+        # state vars must be explicit so it's unambiguous what's a state
+        # var vs. a class-level constant or helper.
+        for name, val in list(cls.__dict__.items()):
             if isinstance(val, StateVar):
-                spec.state_vars.append(val)
-            elif hasattr(val, "__autumn_obj_spec__"):
-                spec.obj_classes.append(val)
-        spec.on_clauses = list(_pending_on_clauses)
+                state_vars.append(val)
+                seen_names.add(val.name or name)
+
+        # Reject annotated attributes that aren't wrapped in StateVar.
+        for name, ty in annotations.items():
+            if name in seen_names:
+                continue
+            if name not in cls.__dict__:
+                continue
+            default = cls.__dict__[name]
+            if isinstance(default, StateVar) or hasattr(default, "__autumn_obj_spec__"):
+                continue
+            raise TypeError(
+                f"@program {cls.__name__!r}: attribute {name!r} is annotated "
+                f"({getattr(ty, '__name__', ty)!r}) with default {default!r} "
+                f"but is not a StateVar. State vars must be declared as "
+                f"`{name} = StateVar({getattr(ty, '__name__', ty)}, init=...)`. "
+                f"For non-state-var class attributes, omit the annotation."
+            )
+
+        # Bind pending next-clauses to their named state vars.
+        by_name = {sv.name: sv for sv in state_vars}
+        for nc_name, nc_fn in _pending_next_clauses:
+            if nc_name not in by_name:
+                raise NameError(
+                    f"@next_clause({nc_name!r}) on {cls.__name__}: "
+                    f"no state variable named {nc_name!r} declared. "
+                    f"Available: {sorted(by_name)}"
+                )
+            sv = by_name[nc_name]
+            _check_next_return_annotation(nc_fn, sv)
+            sv._next_fn = nc_fn
+        _pending_next_clauses.clear()
+
+        # Collect object factories.
+        obj_classes = [v for v in cls.__dict__.values()
+                       if hasattr(v, "__autumn_obj_spec__")]
+
+        spec = ProgramSpec(
+            state_vars=state_vars,
+            on_clauses=list(_pending_on_clauses),
+            obj_classes=obj_classes,
+            config=dict(config),
+        )
         _pending_on_clauses.clear()
         cls._autumn_spec = spec
         return cls
 
     return decorator
+
+
+def _build_state_var(name: str, ty: Any, default: Any) -> StateVar:
+    """Construct a StateVar spec from a class-body declaration.
+
+    Annotation forms accepted:
+    * ``step_count: int = 0``               — plain type
+    * ``step_count: StateVar[int] = 0``     — generic StateVar wrapper
+    * ``enemies: StateVar[list] = field(default_factory=list)``  — with factory
+
+    For ``StateVar[T]`` annotations, the inner ``T`` is extracted as the
+    state var's value-type (used for runtime type checking via
+    ``_check_type``).
+    """
+    # If annotation is StateVar[T], unwrap to T for the spec's type_.
+    origin = typing.get_origin(ty)
+    if origin is StateVar:
+        args = typing.get_args(ty)
+        if args:
+            ty = args[0]
+
+    # dataclasses.field returns a Field; its default may be MISSING.
+    if hasattr(default, "default_factory") and default.default_factory is not MISSING:
+        return StateVar(name=name, type_=ty, init_fn=default.default_factory)
+    if hasattr(default, "default") and default.default is not MISSING:
+        return StateVar(name=name, type_=ty, init=default.default)
+    return StateVar(name=name, type_=ty, init=default)
+
+
+def _check_next_return_annotation(fn: Callable, sv: StateVar) -> None:
+    """If the next-clause function has a return annotation, check it's
+    compatible with the state var's declared type."""
+    if sv.type_ is None or sv.type_ is object:
+        return
+    try:
+        hints = typing.get_type_hints(fn)
+    except Exception:
+        return
+    ret = hints.get("return")
+    if ret is None or ret is object or ret is Any:
+        return
+    if ret is sv.type_:
+        return
+    sv_origin = typing.get_origin(sv.type_)
+    ret_origin = typing.get_origin(ret)
+    if sv_origin is not None and sv_origin is ret_origin:
+        return
+    raise TypeMismatch(
+        f"@next_clause({sv.name!r}): function return type "
+        f"{getattr(ret, '__name__', ret)!r} does not match "
+        f"declared type {getattr(sv.type_, '__name__', sv.type_)!r}"
+    )

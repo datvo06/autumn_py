@@ -51,7 +51,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from typing import Callable
+from typing import Callable, NoReturn
 
 from .ops import if_then_else
 
@@ -91,6 +91,7 @@ class _SymbolicIfRewriter(ast.NodeTransformer):
         if isinstance(b, ast.Return) and isinstance(o, ast.Return):
             if b.value is None or o.value is None:
                 self._fail(node, "both branches' return must have a value")
+            assert b.value is not None and o.value is not None  # narrowed for mypy
             return ast.Return(
                 value=ast.Call(
                     func=ast.Name(id="if_then_else", ctx=ast.Load()),
@@ -145,7 +146,7 @@ class _SymbolicIfRewriter(ast.NodeTransformer):
         )
 
     @staticmethod
-    def _fail(node: ast.If, reason: str) -> None:
+    def _fail(node: ast.If, reason: str) -> NoReturn:
         raise SyntaxError(
             f"@symbolic cannot rewrite this if/else (line {node.lineno}): {reason}. "
             f"Supported patterns: assignment-form, return-form, same-callable-form, "

@@ -6,7 +6,11 @@ wrapper — if something belongs in the handler layer, put it there.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable
+import typing
+from typing import TYPE_CHECKING, Any, Callable, Iterable
+
+if TYPE_CHECKING:
+    from .api import AutumnObj
 
 from .ops import (
     adjPositions_op,
@@ -27,6 +31,11 @@ from .values import ObjectInstance, Position
 # combinators. Instance-form overloads stay direct.
 # ---------------------------------------------------------------------------
 
+@typing.overload
+def addObj(xs: list, obj_or_list: ObjectInstance | "AutumnObj") -> list: ...
+@typing.overload
+def addObj(xs: list, obj_or_list: list) -> list: ...
+
 def addObj(xs, obj_or_list):
     """Append to an object list. Second arg may be a single ObjectInstance or
     a list of them (matching Autumn's polymorphic addObj)."""
@@ -34,6 +43,11 @@ def addObj(xs, obj_or_list):
         return concat_op(xs, obj_or_list)
     return concat_op(xs, [obj_or_list])
 
+
+@typing.overload
+def removeObj(first: ObjectInstance) -> ObjectInstance: ...
+@typing.overload
+def removeObj(first: list, target: ObjectInstance | "AutumnObj" | Callable) -> list: ...
 
 def removeObj(first, target=None):
     """Overloaded:
@@ -51,6 +65,11 @@ def removeObj(first, target=None):
         return filter_op(first, lambda o: not target(o))
     return filter_op(first, lambda o: getattr(o, "id", None) != target.id)
 
+
+@typing.overload
+def updateObj(first: ObjectInstance, name: str, value: Any) -> ObjectInstance: ...
+@typing.overload
+def updateObj(first: list, fn: Callable, pred: Callable | None = ...) -> list: ...
 
 def updateObj(first, *rest):
     """Overloaded:
