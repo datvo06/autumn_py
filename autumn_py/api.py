@@ -133,6 +133,44 @@ class StateVar(Generic[T]):
             return self.init_fn()
         return self.init
 
+    # --- transparent value access: arithmetic / coercion / comparison on
+    # the StateVar object delegates to .get() (which calls get_var, which
+    # flows through the installed handler stack). The user can write
+    # ``MyClass.step_count + 1`` and it Just Works:
+    #
+    #   * Under Runtime → StateHandler returns the concrete int → `+ 1` is
+    #     normal Python arithmetic.
+    #   * Under SmtCollectHandler → returns a Z3 expression → `+ 1`
+    #     produces a Z3 expression (Z3 overloads operators).
+    #   * Under read_set → the get_var atom is recorded via the .get()
+    #     call, then the auto-arithmetic happens on the returned term.
+    #
+    # In all three cases the underlying get_var op is invoked, so the
+    # term/reducibility property is preserved. No silent failure where
+    # the StateVar object itself sneaks into arithmetic / boolean tests.
+    #
+    # __eq__ / __hash__ are NOT overridden — they stay as Python defaults
+    # (identity-based) so StateVar remains hashable and dict/set-keyable.
+
+    def __add__(self, other):       return self.get() + other
+    def __radd__(self, other):      return other + self.get()
+    def __sub__(self, other):       return self.get() - other
+    def __rsub__(self, other):      return other - self.get()
+    def __mul__(self, other):       return self.get() * other
+    def __rmul__(self, other):      return other * self.get()
+    def __mod__(self, other):       return self.get() % other
+    def __floordiv__(self, other):  return self.get() // other
+    def __truediv__(self, other):   return self.get() / other
+    def __lt__(self, other):        return self.get() < other
+    def __gt__(self, other):        return self.get() > other
+    def __le__(self, other):        return self.get() <= other
+    def __ge__(self, other):        return self.get() >= other
+    def __bool__(self):             return bool(self.get())
+    def __int__(self):              return int(self.get())
+    def __float__(self):            return float(self.get())
+    def __index__(self):            return int(self.get())
+    def __len__(self):              return len(self.get())
+
     # --- legacy descriptor decorator methods (for backward compat) -------
 
     def get(self) -> T:

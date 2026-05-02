@@ -267,11 +267,16 @@ def read_set(
     with handler(h):
         try:
             fn()
-        except NotHandled:
-            # An op fired with no concrete-domain handler installed; the
-            # atom was already recorded before the exception, so the
-            # footprint is intact. Other exceptions propagate — those
-            # signal genuine bugs the caller should see.
+        except (NotHandled, z3.Z3Exception):
+            # The atom was already recorded before the exception fired.
+            # Two known-acceptable exception classes:
+            #   * NotHandled — an op fired with no concrete-domain handler.
+            #   * Z3Exception — typically "Symbolic expressions cannot be
+            #     cast to concrete Boolean values," raised when the lambda
+            #     uses native Python `if` / `bool()` on a Z3 expression.
+            #     The lambda should have used @symbolic / if_then_else for
+            #     conditionals; for footprint analysis we only care about
+            #     atoms recorded before the failure.
             pass
     return frozenset(h.atoms)
 
