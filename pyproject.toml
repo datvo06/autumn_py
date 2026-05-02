@@ -13,7 +13,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "z3-solver>=4.13"]
+smt = ["z3-solver>=4.13"]
 
 [tool.setuptools.packages.find]
 include = ["autumn_py*"]

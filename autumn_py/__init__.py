@@ -1,4 +1,4 @@
-from .api import StateVar, obj, on, prev, program
+from .api import AutumnObj, StateVar, field, next_clause, obj, on, prev, program
 from .events import clicked, click, down, left, right, up
 from .runtime import Runtime
 from .values import Cell, ObjectInstance, Position
@@ -9,7 +9,10 @@ __all__ = [
     "on",
     "prev",
     "obj",
+    "AutumnObj",
     "StateVar",
+    "next_clause",
+    "field",
     "Cell",
     "Position",
     "ObjectInstance",
