@@ -313,3 +313,112 @@ def test_space_invaders_r2_fixed_click_fires_player_bullet():
         r.step()
         cells = r.render_all()
     assert len(_cells_by_color(cells, "lightgreen")) >= 1
+
+
+# -------------------------------------------------------------------------
+# Term / reducibility: same @program next-clause under different handler stacks
+# -------------------------------------------------------------------------
+# These tests pin the load-bearing "same evaluator, different handlers"
+# invariant. Take a single, real next-clause function from
+# SpaceInvadersR2Fixed; run it under three different handler stacks
+# (ground execution via Runtime, symbolic via SmtCollectHandler,
+# footprint via read_set). The same Python function produces three
+# qualitatively different results — this is the term/reducibility
+# property the StateVar migration must preserve.
+
+def test_same_next_clause_evaluates_concretely_under_runtime():
+    """Ground execution: SpaceInvadersR2Fixed's spawn_event.next returns
+    a concrete bool when the runtime's StateHandler is installed."""
+    from autumn_py import Runtime
+    from examples.space_invaders import SpaceInvadersR2Fixed
+    with Runtime(SpaceInvadersR2Fixed, seed=42) as r:
+        # Initial: step_count=0, next_spawn_step=3, so spawn_event(t=1) = (0 == 3) = False.
+        r.step()
+        cells = r.render_all()
+        # No yellow enemy bullets yet (spawn fires at tick 4 due to one-tick delay).
+        assert all(c["color"] != "yellow" for c in cells)
+
+
+def test_same_next_clause_produces_z3_expression_under_smt_handler():
+    """Symbolic execution: the SAME spawn_event.next function, run under
+    SmtCollectHandler, returns a Z3 expression instead of a Python bool.
+
+    No handler-aware authoring needed — the function is identical to the
+    one Runtime executes ground; only the handler stack differs."""
+    import z3
+
+    from autumn_py.gate import select_ast
+    from autumn_py.smt import collect_smt
+    from examples.space_invaders import SpaceInvadersR2Fixed
+
+    # Get the exact same next-clause callable the runtime uses.
+    spawn_event_next = select_ast(SpaceInvadersR2Fixed, "spawn_event.next")
+
+    result, constraints, funcs = collect_smt(
+        spawn_event_next,
+        state_var_specs={"step_count": int, "next_spawn_step": int, "spawn_event": bool},
+    )
+
+    # Under SmtCollectHandler, set_var("spawn_event", value) records the
+    # transition `spawn_event(t+1) = value`. The constraint set must
+    # contain that transition; the funcs dict exposes the Z3 functions.
+    assert "spawn_event" in funcs
+    assert "step_count" in funcs
+    assert "next_spawn_step" in funcs
+    assert any(isinstance(c, z3.BoolRef) for c in constraints)
+
+
+def test_same_next_clause_produces_atom_set_under_read_set():
+    """Footprint extraction: the SAME spawn_event.next, run under
+    read_set, returns the syntactic atoms (read_set IS SmtCollectHandler
+    with auto_declare=True; the atom-set is a side product of the run)."""
+    from autumn_py.gate import select_ast
+    from autumn_py.smt import read_set
+    from examples.space_invaders import SpaceInvadersR2Fixed
+
+    spawn_event_next = select_ast(SpaceInvadersR2Fixed, "spawn_event.next")
+    atoms = read_set(spawn_event_next)
+
+    # The clause reads step_count (current tick) and prev(next_spawn_step),
+    # then writes spawn_event. Atoms reflect exactly these op invocations.
+    assert ("get_var", "step_count", 0) in atoms
+    assert ("get_var", "next_spawn_step", -1) in atoms
+    assert ("set_var", "spawn_event") in atoms
+    # No sample_uniform — round 2-fixed is deterministic.
+    assert not any(a[0] == "sample_uniform" for a in atoms)
+
+
+def test_term_reducibility_invariant_across_three_handler_stacks():
+    """Single closing test: the SAME function (`spawn_event.next` from
+    SpaceInvadersR2Fixed) yields three qualitatively different results
+    under three different handler stacks — without a single line of the
+    function being changed. This is the term/reducibility property
+    `effectful` provides and that our StateVar migration preserved."""
+    from autumn_py import Runtime
+    from autumn_py.gate import select_ast
+    from autumn_py.smt import collect_smt, read_set
+    from examples.space_invaders import SpaceInvadersR2Fixed
+
+    spawn_event_next = select_ast(SpaceInvadersR2Fixed, "spawn_event.next")
+
+    # 1. read_set: a frozenset of atoms (syntactic op-call sites).
+    atoms = read_set(spawn_event_next)
+    assert isinstance(atoms, frozenset)
+    assert len(atoms) > 0
+
+    # 2. collect_smt: Z3 constraints (semantic transition rules).
+    _, constraints, _ = collect_smt(
+        spawn_event_next,
+        state_var_specs={"step_count": int, "next_spawn_step": int, "spawn_event": bool},
+    )
+    assert len(constraints) > 0
+    # SMT result type is qualitatively different from the atom-set:
+    assert not isinstance(constraints, frozenset)
+
+    # 3. Runtime: concrete step-by-step execution.
+    with Runtime(SpaceInvadersR2Fixed, seed=42) as r:
+        r.step()
+        cells = r.render_all()
+        # Concrete result is yet-different again — a list of rendered cells.
+        assert isinstance(cells, list)
+        assert all("color" in c for c in cells)
