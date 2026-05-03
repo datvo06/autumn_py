@@ -75,6 +75,30 @@ class ModularArithmeticGoal(Goal):
 
 
 @dataclass(frozen=True)
+class TrajectoryInvariantGoal(Goal):
+    """Concrete-trajectory invariant.
+
+    Walks the program for ``steps`` ticks under the live runtime stack,
+    capturing a snapshot of every state var before and after each tick.
+    For each ``t`` in ``range(steps)``, ``predicate`` is invoked with
+    each state-var name bound to a per-tick lookup function so the
+    lambda body can index by tick:
+
+        ``lambda ant, food, t: dist(ant(t+1), food(t)) <= dist(ant(t), food(t))``
+
+    Same indexed-function shape as :class:`ModularArithmeticGoal`'s
+    ``invariant``, but resolved against recorded snapshots (concrete
+    Python values) rather than Z3 functions. Tick indices clamp to the
+    recorded range — out-of-range reads return the boundary snapshot.
+
+    A residual is returned on the first ``t`` at which ``predicate``
+    returns falsy; the witness is ``{"t": t, "snapshot": snapshots[t]}``.
+    """
+    predicate: Callable[..., Any]
+    steps: int = 10
+
+
+@dataclass(frozen=True)
 class WriteFrameGoal(Goal):
     """The decorated body's write-set must be a subset of
     ``allowed_writes`` (plus the implicitly-allowed state var the
@@ -217,6 +241,83 @@ def _check_footprint_include(
     return None
 
 
+def _record_trajectory(emit_cls: type, steps: int) -> list[dict]:
+    """Run ``emit_cls`` under a Runtime for ``steps`` ticks; return
+    ``steps + 1`` snapshots — one before each tick, plus one after the
+    final tick. Each snapshot is a plain ``dict`` of state-var name →
+    value (post-init / post-tick state).
+
+    The Runtime is closed before returning. Uses ``seed=42`` for
+    reproducibility; trajectory_invariant goals are deterministic-walk
+    by construction (a stochastic program with a trajectory invariant
+    that flakes is a real residual the user wants to see).
+    """
+    from .runtime import Runtime
+    snapshots: list[dict] = []
+    with Runtime(emit_cls, seed=42) as rt:
+        snapshots.append(dict(rt.state.freeze_snapshot()))
+        for _ in range(steps):
+            rt.step()
+            snapshots.append(dict(rt.state.freeze_snapshot()))
+    return snapshots
+
+
+def _check_trajectory_invariant(
+    emit_cls: type, goal: TrajectoryInvariantGoal,
+) -> Residual | None:
+    """Walk the recorded trajectory, evaluate ``goal.predicate`` at each
+    tick boundary. Same param-introspection as ``_check_modular``: bare
+    parameter names are bound to per-tick lookup functions, the trailing
+    ``t`` parameter receives the tick index.
+
+    Each lookup function ``f`` satisfies ``f(k) == snapshots[k][name]``,
+    with ``k`` clamped to ``[0, len(snapshots) - 1]`` so out-of-range
+    indices (``ant(t-1)`` at ``t=0``) return boundary values instead of
+    raising. The lambda is responsible for guarding boundary cases if
+    that matters to the property.
+    """
+    snapshots = _record_trajectory(emit_cls, goal.steps)
+    n = len(snapshots)
+
+    def make_lookup(name: str) -> Callable[[int], Any]:
+        def f(k: int) -> Any:
+            kk = max(0, min(n - 1, int(k)))
+            return snapshots[kk][name]
+        f.__name__ = f"{name}.trajectory_lookup"
+        return f
+
+    # Bind one lookup per state var declared in spec.
+    spec = emit_cls._autumn_spec
+    var_lookups = {sv.name: make_lookup(sv.name) for sv in spec.state_vars}
+
+    sig = inspect.signature(goal.predicate)
+    params = list(sig.parameters.keys())
+    if not params or params[-1] != "t":
+        raise TypeError(
+            f"trajectory_invariant lambda must take a final ``t`` "
+            f"parameter; got params {params!r}"
+        )
+    sv_params = params[:-1]
+    bound: list[Any] = []
+    for name in sv_params:
+        if name not in var_lookups:
+            raise NameError(
+                f"trajectory_invariant lambda parameter {name!r} is not "
+                f"a known state-var name. Available: {sorted(var_lookups)}"
+            )
+        bound.append(var_lookups[name])
+
+    # Walk t over [0, steps - 1] — the (snapshot[t], snapshot[t+1]) pairs.
+    for t in range(goal.steps):
+        result = goal.predicate(*bound, t)
+        if not result:
+            return Residual(
+                goal=goal,
+                witness={"t": t, "snapshot": dict(snapshots[t])},
+            )
+    return None
+
+
 def _check_write_frame(
     emit_cls: type, goal: WriteFrameGoal,
 ) -> Residual | None:
@@ -311,10 +412,11 @@ def _call_with_funcs(fn: Callable, funcs: dict, *trailing_args) -> Any:
 # --------------------------------------------------------------------------
 
 _CHECKERS: dict[type, Callable[[type, Any], Residual | None]] = {
-    FootprintExcludeGoal: _check_footprint_exclude,
-    FootprintIncludeGoal: _check_footprint_include,
-    ModularArithmeticGoal: _check_modular,
-    WriteFrameGoal:        _check_write_frame,
+    FootprintExcludeGoal:    _check_footprint_exclude,
+    FootprintIncludeGoal:    _check_footprint_include,
+    ModularArithmeticGoal:   _check_modular,
+    WriteFrameGoal:          _check_write_frame,
+    TrajectoryInvariantGoal: _check_trajectory_invariant,
 }
 
 

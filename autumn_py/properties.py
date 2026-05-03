@@ -73,6 +73,17 @@ class Spec:
     monotone : str | None
         One of ``_VALID_MONOTONE``. (Future work — currently validated
         but does not mint a goal.)
+    trajectory_invariant : Callable[..., bool] | None
+        Concrete-walk invariant: a lambda whose parameters are state-
+        var names plus a final ``t`` (tick index). Same indexed-function
+        shape as ``invariant``: ``ant(t)``, ``ant(t+1)``, ``food(t-1)``
+        — but resolved against recorded snapshots, not Z3.
+        Mints a ``TrajectoryInvariantGoal`` checked by
+        ``_check_trajectory_invariant``, which runs the program for
+        ``trajectory_steps`` ticks and verifies the predicate at every
+        ``(snapshot[t], snapshot[t+1])`` pair.
+    trajectory_steps : int
+        Number of trajectory ticks to record before checking. Default 10.
     """
     no_stochastic: bool = False
     modifies: tuple | None = None
@@ -81,6 +92,8 @@ class Spec:
     init_constraints: Callable[[Any], list] | None = None
     horizon: int = 6
     monotone: str | None = None
+    trajectory_invariant: Callable[..., bool] | None = None
+    trajectory_steps: int = 10
 
     def __post_init__(self) -> None:
         # Imported lazily to avoid circular import: properties → api → properties
@@ -121,6 +134,10 @@ class Spec:
                 "Spec.unroll is only meaningful with an invariant; "
                 "received unroll without invariant"
             )
+        if self.trajectory_steps < 1:
+            raise ValueError(
+                f"Spec.trajectory_steps must be >= 1; got {self.trajectory_steps}"
+            )
 
     def merge(self, other: "Spec") -> "Spec":
         """Right-biased merge — `other`'s populated fields override self.
@@ -136,6 +153,14 @@ class Spec:
             ),
             horizon=other.horizon if other.horizon != 6 else self.horizon,
             monotone=other.monotone if other.monotone is not None else self.monotone,
+            trajectory_invariant=(
+                other.trajectory_invariant if other.trajectory_invariant is not None
+                else self.trajectory_invariant
+            ),
+            trajectory_steps=(
+                other.trajectory_steps if other.trajectory_steps != 10
+                else self.trajectory_steps
+            ),
         )
 
 
@@ -214,6 +239,7 @@ def realize_spec_goals(spec_obj: Spec, anchor: str) -> list:
     from .gate import (
         FootprintExcludeGoal,
         ModularArithmeticGoal,
+        TrajectoryInvariantGoal,
         WriteFrameGoal,
     )
 
@@ -240,6 +266,12 @@ def realize_spec_goals(spec_obj: Spec, anchor: str) -> list:
             init_constraints=spec_obj.init_constraints or (lambda *args: []),
             goal_factory=spec_obj.invariant,
             horizon=spec_obj.horizon,
+        ))
+    if spec_obj.trajectory_invariant is not None:
+        goals.append(TrajectoryInvariantGoal(
+            anchor=anchor,
+            predicate=spec_obj.trajectory_invariant,
+            steps=spec_obj.trajectory_steps,
         ))
     # spec_obj.monotone is validated but doesn't mint a goal yet — future work.
     return goals

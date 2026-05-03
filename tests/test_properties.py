@@ -24,6 +24,7 @@ from autumn_py.gate import (
     FootprintExcludeGoal,
     ModularArithmeticGoal,
     Residual,
+    TrajectoryInvariantGoal,
     WriteFrameGoal,
     gate,
 )
@@ -484,3 +485,156 @@ def test_spec_invariant_unknown_param_name_raises_loudly():
 
     with pytest.raises(NameError, match="not a known state-var name"):
         gate(P)
+
+
+# -------------------------------------------------------------------------
+# TrajectoryInvariantGoal — concrete-walk invariants over recorded snapshots
+# -------------------------------------------------------------------------
+
+def test_realize_spec_goals_trajectory_mints_trajectory_invariant():
+    s = Spec(
+        trajectory_invariant=lambda x, t: x(t + 1) >= x(t),
+        trajectory_steps=5,
+    )
+    goals = realize_spec_goals(s, anchor="x.next")
+    assert len(goals) == 1
+    assert isinstance(goals[0], TrajectoryInvariantGoal)
+    assert goals[0].steps == 5
+    assert goals[0].anchor == "x.next"
+
+
+def test_spec_rejects_zero_trajectory_steps():
+    with pytest.raises(ValueError, match="trajectory_steps must be >= 1"):
+        Spec(trajectory_steps=0)
+
+
+def test_trajectory_invariant_passes_for_monotone_counter():
+    """A pure incrementing counter satisfies ``x(t+1) >= x(t)``."""
+    @program(grid_size=8)
+    class P:
+        x = StateVar(int, init=0)
+
+        @x.next
+        @spec(
+            trajectory_invariant=lambda x, t: x(t + 1) >= x(t),
+            trajectory_steps=6,
+        )
+        def _() -> int:
+            return prev(P.x) + 1
+
+    residuals = gate(P)
+    assert residuals == []
+
+
+def test_trajectory_invariant_fails_returns_residual_with_witness():
+    """A decrementing counter violates ``x(t+1) >= x(t)``; the gate returns
+    a residual whose witness names the failing tick and snapshot."""
+    @program(grid_size=8)
+    class P:
+        x = StateVar(int, init=0)
+
+        @x.next
+        @spec(
+            trajectory_invariant=lambda x, t: x(t + 1) >= x(t),
+            trajectory_steps=4,
+        )
+        def _() -> int:
+            return prev(P.x) - 1
+
+    residuals = gate(P)
+    assert len(residuals) == 1
+    assert isinstance(residuals[0].goal, TrajectoryInvariantGoal)
+    witness = residuals[0].witness
+    assert witness["t"] == 0   # first tick already violates
+    assert witness["snapshot"]["x"] == 0
+
+
+def test_trajectory_invariant_with_multiple_state_vars():
+    """Lambda binds each bare param to its state var's lookup function."""
+    @program(grid_size=8)
+    class P:
+        x = StateVar(int, init=0)
+        y = StateVar(int, init=10)
+
+        @x.next
+        @spec(
+            # x grows, y shrinks → x(t) + y(t) stays constant.
+            trajectory_invariant=lambda x, y, t: x(t) + y(t) == 10,
+            trajectory_steps=5,
+        )
+        def _() -> int:
+            return prev(P.x) + 1
+
+        @y.next
+        def _() -> int:
+            return prev(P.y) - 1
+
+    residuals = gate(P)
+    assert residuals == []
+
+
+def test_trajectory_invariant_supports_prev_lookup_via_negative_offset():
+    """``x(t-1)`` reads the prior snapshot; out-of-range clamps to t=0."""
+    @program(grid_size=8)
+    class P:
+        x = StateVar(int, init=0)
+
+        @x.next
+        @spec(
+            # x grows by 1 per tick, so x(t) - x(t-1) == 1 for t >= 1.
+            # At t=0 the lookup clamps to snapshot[0] on both sides → 0,
+            # so we guard the boundary explicitly.
+            trajectory_invariant=lambda x, t:
+                True if t == 0 else (x(t) - x(t - 1) == 1),
+            trajectory_steps=5,
+        )
+        def _() -> int:
+            return prev(P.x) + 1
+
+    residuals = gate(P)
+    assert residuals == []
+
+
+def test_trajectory_invariant_unknown_param_name_raises_loudly():
+    @program(grid_size=8)
+    class P:
+        x = StateVar(int, init=0)
+
+        @x.next
+        @spec(
+            trajectory_invariant=lambda nonexistent, t: nonexistent(t) >= 0,
+            trajectory_steps=3,
+        )
+        def _() -> int:
+            return prev(P.x) + 1
+
+    with pytest.raises(NameError, match="not a known state-var name"):
+        gate(P)
+
+
+def test_trajectory_invariant_requires_final_t_param():
+    @program(grid_size=8)
+    class P:
+        x = StateVar(int, init=0)
+
+        @x.next
+        @spec(
+            # Missing final ``t`` parameter — invalid signature.
+            trajectory_invariant=lambda x: x(0) >= 0,
+            trajectory_steps=3,
+        )
+        def _() -> int:
+            return prev(P.x) + 1
+
+    with pytest.raises(TypeError, match="final ``t`` parameter"):
+        gate(P)
+
+
+def test_ants_trajectory_invariant_holds_on_recorded_walk():
+    """The food-distance property on examples/ants.py: for every t, the
+    sum of squared distances from each ant to its nearest food does not
+    increase across the tick (vacuous when there's no food)."""
+    from examples.ants import AntsGame
+
+    residuals = gate(AntsGame)
+    assert residuals == [], f"unexpected residuals: {residuals}"
