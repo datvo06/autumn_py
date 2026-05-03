@@ -183,7 +183,13 @@ class StateVar(Generic[T]):
 
     def next(self, fn: Callable[[], Any]) -> Callable[[], Any]:
         """Legacy: ``@<sv>.next def _(): ...``. Modern equivalent is
-        ``@next_clause("<name>") def _(): ...``."""
+        ``@next_clause("<name>") def _(): ...``.
+
+        Spec metadata attached via ``@spec(...)``/``@modifies(...)``/
+        ``@no_stochastic`` is preserved on ``fn.__autumn_spec__`` and
+        materialised by ``@program`` (which has the bound state-var
+        name; ``__set_name__`` doesn't run until the class body
+        finishes, so we can't materialise here yet)."""
         _check_next_return_annotation(fn, self)
         self._next_fn = fn
         return fn
@@ -226,6 +232,7 @@ class ProgramSpec:
     on_clauses: list[OnClause]
     obj_classes: list[Any]
     config: dict
+    properties: list = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -470,7 +477,7 @@ def program(**config):
                 f"For non-state-var class attributes, omit the annotation."
             )
 
-        # Bind pending next-clauses to their named state vars.
+        # Bind pending next-clauses (modern @next_clause(name) form).
         by_name = {sv.name: sv for sv in state_vars}
         for nc_name, nc_fn in _pending_next_clauses:
             if nc_name not in by_name:
@@ -484,15 +491,34 @@ def program(**config):
             sv._next_fn = nc_fn
         _pending_next_clauses.clear()
 
+        # Materialise spec goals from any `__autumn_spec__` attached to
+        # next-clause bodies. Done here (not at @<sv>.next decoration
+        # time) because StateVar names bind during class-body finalisation
+        # via ``__set_name__``; the decorator runs earlier with name=None.
+        from .properties import _pending_properties, realize_spec_goals
+        for sv in state_vars:
+            if sv._next_fn is None:
+                continue
+            autumn_spec = getattr(sv._next_fn, "__autumn_spec__", None)
+            if autumn_spec is not None:
+                _pending_properties.extend(
+                    realize_spec_goals(autumn_spec, f"{sv.name}.next")
+                )
+
         # Collect object factories.
         obj_classes = [v for v in cls.__dict__.values()
                        if hasattr(v, "__autumn_obj_spec__")]
+
+        # Drain pending property goals registered above.
+        properties = list(_pending_properties)
+        _pending_properties.clear()
 
         spec = ProgramSpec(
             state_vars=state_vars,
             on_clauses=list(_pending_on_clauses),
             obj_classes=obj_classes,
             config=dict(config),
+            properties=properties,
         )
         _pending_on_clauses.clear()
         cls._autumn_spec = spec

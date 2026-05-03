@@ -13,10 +13,12 @@ from autumn_py import (
     StateVar,
     clicked,
     left,
+    no_stochastic,
     on,
     prev,
     program,
     right,
+    spec,
 )
 from autumn_py._ast_rewrite import symbolic
 from autumn_py.stdlib import (
@@ -65,6 +67,25 @@ class SpaceInvadersR2Fixed:
             return cur_spawn
 
     @spawn_event.next
+    @spec(
+        # The spawn-decision predicate must be deterministic — no stochastic
+        # ops in the spawn-event next-clause's read-set.
+        no_stochastic = True,
+        # The spawn predicate writes spawn_event only.
+        modifies = (spawn_event,),
+        # Across the bounded horizon: spawn_event(t+1) iff (t mod 15 == 3).
+        # Lambda parameters bind by name to the corresponding state vars'
+        # Z3 functions; no funcs[] indirection needed.
+        invariant = lambda step_count, next_spawn_step, spawn_event, t:
+            spawn_event(t + 1) == ((t % 15) == 3),
+        unroll = (next_spawn_step, spawn_event),
+        init_constraints = lambda step_count, next_spawn_step, spawn_event: [
+            *(step_count(k) == k for k in range(8)),
+            next_spawn_step(0)  == 3,
+            next_spawn_step(-1) == 3,
+        ],
+        horizon = 6,
+    )
     def _() -> bool:
         return (SpaceInvadersR2Fixed.step_count.get()
                 == prev(SpaceInvadersR2Fixed.next_spawn_step))
