@@ -22,6 +22,7 @@ goal/idiom library described in §2.5 of the draft.
 """
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -71,6 +72,49 @@ class ModularArithmeticGoal(Goal):
     init_constraints: Callable[[dict], list[z3.BoolRef]]
     goal_factory: Callable[[dict, int], z3.BoolRef]
     horizon: int = 6
+
+
+@dataclass(frozen=True)
+class TrajectoryInvariantGoal(Goal):
+    """Concrete-trajectory invariant.
+
+    Walks the program for ``steps`` ticks under the live runtime stack,
+    capturing a snapshot of every state var before and after each tick.
+    For each ``t`` in ``range(steps)``, ``predicate`` is invoked with
+    each state-var name bound to a per-tick lookup function so the
+    lambda body can index by tick:
+
+        ``lambda ant, food, t: dist(ant(t+1), food(t)) <= dist(ant(t), food(t))``
+
+    Same indexed-function shape as :class:`ModularArithmeticGoal`'s
+    ``invariant``, but resolved against recorded snapshots (concrete
+    Python values) rather than Z3 functions. Tick indices clamp to the
+    recorded range — out-of-range reads return the boundary snapshot.
+
+    A residual is returned on the first ``t`` at which ``predicate``
+    returns falsy; the witness is ``{"t": t, "snapshot": snapshots[t]}``.
+    """
+    predicate: Callable[..., Any]
+    steps: int = 10
+
+
+@dataclass(frozen=True)
+class WriteFrameGoal(Goal):
+    """The decorated body's write-set must be a subset of
+    ``allowed_writes`` (plus the implicitly-allowed state var the
+    body is the next-clause for: e.g., ``foo.next``'s write to ``foo``
+    is always allowed).
+
+    Catches the silent-aliasing failure mode: a next-clause for
+    ``step_count`` accidentally writes to ``next_spawn_step``. Today's
+    runtime would silently let the side-write through; this goal
+    surfaces it as a residual at gate time.
+
+    Implementation: runs the next-clause under ``read_set`` (which
+    records ``("set_var", name)`` atoms for every write); checks the
+    write-set against ``allowed_writes ∪ {self_var}``.
+    """
+    allowed_writes: tuple[str, ...]
 
 
 @dataclass
@@ -197,6 +241,108 @@ def _check_footprint_include(
     return None
 
 
+def _record_trajectory(emit_cls: type, steps: int) -> list[dict]:
+    """Run ``emit_cls`` under a Runtime for ``steps`` ticks; return
+    ``steps + 1`` snapshots — one before each tick, plus one after the
+    final tick. Each snapshot is a plain ``dict`` of state-var name →
+    value (post-init / post-tick state).
+
+    The Runtime is closed before returning. Uses ``seed=42`` for
+    reproducibility; trajectory_invariant goals are deterministic-walk
+    by construction (a stochastic program with a trajectory invariant
+    that flakes is a real residual the user wants to see).
+    """
+    from .runtime import Runtime
+    snapshots: list[dict] = []
+    with Runtime(emit_cls, seed=42) as rt:
+        snapshots.append(dict(rt.state.freeze_snapshot()))
+        for _ in range(steps):
+            rt.step()
+            snapshots.append(dict(rt.state.freeze_snapshot()))
+    return snapshots
+
+
+def _check_trajectory_invariant(
+    emit_cls: type, goal: TrajectoryInvariantGoal,
+) -> Residual | None:
+    """Walk the recorded trajectory, evaluate ``goal.predicate`` at each
+    tick boundary. Same param-introspection as ``_check_modular``: bare
+    parameter names are bound to per-tick lookup functions, the trailing
+    ``t`` parameter receives the tick index.
+
+    Each lookup function ``f`` satisfies ``f(k) == snapshots[k][name]``,
+    with ``k`` clamped to ``[0, len(snapshots) - 1]`` so out-of-range
+    indices (``ant(t-1)`` at ``t=0``) return boundary values instead of
+    raising. The lambda is responsible for guarding boundary cases if
+    that matters to the property.
+    """
+    snapshots = _record_trajectory(emit_cls, goal.steps)
+    n = len(snapshots)
+
+    def make_lookup(name: str) -> Callable[[int], Any]:
+        def f(k: int) -> Any:
+            kk = max(0, min(n - 1, int(k)))
+            return snapshots[kk][name]
+        f.__name__ = f"{name}.trajectory_lookup"
+        return f
+
+    # Bind one lookup per state var declared in spec.
+    spec = emit_cls._autumn_spec
+    var_lookups = {sv.name: make_lookup(sv.name) for sv in spec.state_vars}
+
+    sig = inspect.signature(goal.predicate)
+    params = list(sig.parameters.keys())
+    if not params or params[-1] != "t":
+        raise TypeError(
+            f"trajectory_invariant lambda must take a final ``t`` "
+            f"parameter; got params {params!r}"
+        )
+    sv_params = params[:-1]
+    bound: list[Any] = []
+    for name in sv_params:
+        if name not in var_lookups:
+            raise NameError(
+                f"trajectory_invariant lambda parameter {name!r} is not "
+                f"a known state-var name. Available: {sorted(var_lookups)}"
+            )
+        bound.append(var_lookups[name])
+
+    # Walk t over [0, steps - 1] — the (snapshot[t], snapshot[t+1]) pairs.
+    for t in range(goal.steps):
+        result = goal.predicate(*bound, t)
+        if not result:
+            return Residual(
+                goal=goal,
+                witness={"t": t, "snapshot": dict(snapshots[t])},
+            )
+    return None
+
+
+def _check_write_frame(
+    emit_cls: type, goal: WriteFrameGoal,
+) -> Residual | None:
+    """Verify the decorated body's write-set is ⊆ allowed_writes ∪
+    {implicitly-decorated state var}.
+
+    The implicit member: if anchor is ``"foo.next"``, then writes to
+    ``foo`` are always allowed (the next-clause's job is to compute
+    foo's new value). Other writes must be explicitly listed in
+    ``allowed_writes`` or the goal fails.
+    """
+    target = select_ast(emit_cls, goal.anchor)
+    atoms = read_set(target)
+    actual_writes = {a[1] for a in atoms if a[0] == "set_var"}
+
+    # Implicit allow: the state var the anchor refers to.
+    head, _, _ = goal.anchor.partition(".")
+    allowed = set(goal.allowed_writes) | {head}
+
+    violating = sorted(actual_writes - allowed)
+    if violating:
+        return Residual(goal=goal, witness=violating)
+    return None
+
+
 def _check_modular(
     emit_cls: type, goal: ModularArithmeticGoal,
 ) -> Residual | None:
@@ -211,8 +357,11 @@ def _check_modular(
             constraints.extend(sub_cs)
             funcs.update(sub_funcs)
 
-    constraints.extend(goal.init_constraints(funcs))
-    bounded_goal = z3.And(*[goal.goal_factory(funcs, k) for k in range(goal.horizon)])
+    constraints.extend(_call_with_funcs(goal.init_constraints, funcs))
+    bounded_goal = z3.And(*[
+        _call_with_funcs(goal.goal_factory, funcs, k)
+        for k in range(goal.horizon)
+    ])
 
     cex = solve_against_goal(constraints, bounded_goal)
     if cex is None:
@@ -220,25 +369,83 @@ def _check_modular(
     return Residual(goal=goal, witness=cex)
 
 
+def _call_with_funcs(fn: Callable, funcs: dict, *trailing_args) -> Any:
+    """Call ``fn`` with state-var Z3 functions bound by parameter name.
+
+    Two supported lambda shapes:
+
+    * **New form (preferred)** — parameters named after state vars:
+      ``lambda x, y, t: x(t+1) >= y(t)``. The gate inspects the
+      parameter names, looks up the matching Z3 function in ``funcs``,
+      and binds them. The last param (or all of them, for
+      ``init_constraints`` that takes no tick) gets ``*trailing_args``.
+
+    * **Legacy form** — first parameter is named ``funcs`` (literal):
+      ``lambda funcs, k: funcs["x"](k+1) >= funcs["y"](k)``. The gate
+      passes ``funcs`` as the first arg and ``*trailing_args`` after.
+    """
+    sig = inspect.signature(fn)
+    params = list(sig.parameters.keys())
+
+    # Legacy form: first param literally named "funcs" → pass dict directly.
+    if params and params[0] == "funcs":
+        return fn(funcs, *trailing_args)
+
+    # New form: leading params named after state vars; trailing positional
+    # args (e.g., the tick index) go after.
+    n_trailing = len(trailing_args)
+    sv_param_count = len(params) - n_trailing
+    sv_params = params[:sv_param_count]
+    bound = []
+    for name in sv_params:
+        if name not in funcs:
+            raise NameError(
+                f"invariant/init_constraints lambda parameter {name!r} "
+                f"is not a known state-var name. Available: {sorted(funcs)}"
+            )
+        bound.append(funcs[name])
+    return fn(*bound, *trailing_args)
+
+
 # --------------------------------------------------------------------------
 # Module-level dispatch — Goal subclass → checker
 # --------------------------------------------------------------------------
 
 _CHECKERS: dict[type, Callable[[type, Any], Residual | None]] = {
-    FootprintExcludeGoal: _check_footprint_exclude,
-    FootprintIncludeGoal: _check_footprint_include,
-    ModularArithmeticGoal: _check_modular,
+    FootprintExcludeGoal:    _check_footprint_exclude,
+    FootprintIncludeGoal:    _check_footprint_include,
+    ModularArithmeticGoal:   _check_modular,
+    WriteFrameGoal:          _check_write_frame,
+    TrajectoryInvariantGoal: _check_trajectory_invariant,
 }
 
 
-def gate(emit_cls: type, goals: list[Goal]) -> list[Residual]:
-    """Run every goal against `emit_cls`, returning the list of residuals.
+def gate(
+    emit_cls: type,
+    goals: list[Goal] | None = None,
+) -> list[Residual]:
+    """Run goals against `emit_cls`, returning the list of residuals.
 
-    Empty list ⇒ emit committed. Non-empty ⇒ rejected; each residual is
-    the synthesizer's repair input for the next emit-proposal step.
+    Goal sources, conjoined in this order:
+
+    1. Goals registered on the program via ``@spec(...)``,
+       ``@modifies(...)``, or ``@no_stochastic`` (read from
+       ``emit_cls._autumn_spec.properties``).
+    2. Goals passed in via the ``goals`` parameter (the original API,
+       still supported for explicit / synthesized goals not declared
+       on the program itself).
+
+    Empty residual list ⇒ emit committed. Non-empty ⇒ rejected; each
+    residual is the synthesizer's repair input for the next emit-
+    proposal step.
     """
+    spec = getattr(emit_cls, "_autumn_spec", None)
+    program_goals = list(spec.properties) if spec is not None else []
+    user_goals = list(goals) if goals is not None else []
+    all_goals = program_goals + user_goals
+
     residuals: list[Residual] = []
-    for goal in goals:
+    for goal in all_goals:
         checker = _CHECKERS.get(type(goal))
         if checker is None:
             raise NotImplementedError(
