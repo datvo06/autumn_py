@@ -14,6 +14,7 @@ in the doc.
 """
 from __future__ import annotations
 
+import pytest
 import z3
 
 from autumn_py.ops import (
@@ -26,6 +27,7 @@ from autumn_py._ast_rewrite import symbolic
 from autumn_py.ops import if_then_else
 from autumn_py.smt import (
     collect_smt,
+    read_set,
     solve_against_goal,
     unroll_transitions,
 )
@@ -426,3 +428,34 @@ def test_symbolic_preserves_ground_execution_semantics():
     assert returns_max(5, 3) == 5
     assert returns_max(2, 7) == 7
     assert returns_max(4, 4) == 4
+
+
+# -------------------------------------------------------------------------
+# read_set soundness — the atom-before-effect ordering invariant
+# -------------------------------------------------------------------------
+
+def test_read_set_records_atoms_before_a_mid_clause_raise():
+    """read_set's over-approximation rests on every handler method appending
+    its atom *before* anything that can raise. A clause that records a write,
+    then trips the symbolic-bool cast (native `if` on a Z3 value), must still
+    have the pre-raise write in its footprint."""
+    def clause():
+        set_var("written_before", 1)        # atom recorded first
+        if get_var("flag") == 0:            # native if on a Z3 BoolRef → raises
+            set_var("after", 2)             # unreached
+
+    atoms = read_set(clause)
+    assert ("set_var", "written_before") in atoms
+    assert ("get_var", "flag", 0) in atoms
+
+
+def test_read_set_propagates_unexpected_errors():
+    """read_set tolerates only the symbolic-bool cast (and out-of-vocabulary
+    NotHandled). A genuine bug in a clause must surface, not be swallowed
+    into a silently-truncated footprint."""
+    def buggy():
+        get_var("x")
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError, match="boom"):
+        read_set(buggy)

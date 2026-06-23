@@ -270,17 +270,22 @@ def read_set(
     with handler(h):
         try:
             fn()
-        except (NotHandled, z3.Z3Exception):
-            # The atom was already recorded before the exception fired.
-            # Two known-acceptable exception classes:
-            #   * NotHandled — an op fired with no concrete-domain handler.
-            #   * Z3Exception — typically "Symbolic expressions cannot be
-            #     cast to concrete Boolean values," raised when the lambda
-            #     uses native Python `if` / `bool()` on a Z3 expression.
-            #     The lambda should have used @symbolic / if_then_else for
-            #     conditionals; for footprint analysis we only care about
-            #     atoms recorded before the failure.
+        except NotHandled:
+            # An op outside the SMT vocabulary fired (a world query like
+            # grid_size / all_objs has no symbolic interpretation). The
+            # footprint atoms gate goals care about — get_var / set_var /
+            # get_prev_var / sample_uniform — are recorded before such an op
+            # could run, because every handler method appends its atom as its
+            # first statement. Locked by
+            # ``test_read_set_records_atoms_before_a_mid_clause_raise``.
             pass
+        except z3.Z3Exception as e:
+            # Tolerate only the symbolic-bool cast, raised when a raw clause
+            # uses native `if` / `bool()` on a Z3 expression (it should have
+            # used @symbolic / if_then_else). Any other Z3 error is a real
+            # bug and must surface rather than silently truncate the footprint.
+            if "Boolean" not in str(e):
+                raise
     return frozenset(h.atoms)
 
 
