@@ -11,9 +11,8 @@ is by `isinstance`. Each checker returns ``Residual | None`` —
 
 Currently implemented goal shapes:
 
-* :class:`FootprintExcludeGoal` / :class:`FootprintIncludeGoal` —
-  syntactic-dependency checks against the read-set (P_1, P_4, P_6,
-  P_8, P_12 in the doc).
+* :class:`FootprintExcludeGoal` — syntactic-dependency checks against
+  the read-set (P_1, P_4, P_6, P_8, P_12 in the doc).
 * :class:`ModularArithmeticGoal` — bounded-model SMT check via
   ``autumn_py.smt.collect_smt`` and ``solve_against_goal`` (P_3, P_11).
 
@@ -49,13 +48,6 @@ class FootprintExcludeGoal(Goal):
     a wildcard, e.g. ``("get_var", Ellipsis, -1)`` matches any prev-tick
     variable read."""
     exclude: tuple[tuple, ...]
-
-
-@dataclass(frozen=True)
-class FootprintIncludeGoal(Goal):
-    """The lambda at ``anchor``'s read-set must contain at least one
-    atom matching each pattern in ``include``."""
-    include: tuple[tuple, ...]
 
 
 @dataclass(frozen=True)
@@ -228,19 +220,6 @@ def _check_footprint_exclude(
     return None
 
 
-def _check_footprint_include(
-    emit_cls: type, goal: FootprintIncludeGoal,
-) -> Residual | None:
-    target = select_ast(emit_cls, goal.anchor)
-    atoms = read_set(target)
-    missing = sorted(
-        p for p in goal.include if not any(_atom_matches(a, p) for a in atoms)
-    )
-    if missing:
-        return Residual(goal=goal, witness=missing)
-    return None
-
-
 def _record_trajectory(emit_cls: type, steps: int) -> list[dict]:
     """Run ``emit_cls`` under a Runtime for ``steps`` ticks; return
     ``steps + 1`` snapshots — one before each tick, plus one after the
@@ -397,7 +376,6 @@ def _call_with_funcs(fn: Callable, funcs: dict, *trailing_args) -> Any:
 
 _CHECKERS: dict[type, Callable[[type, Any], Residual | None]] = {
     FootprintExcludeGoal:    _check_footprint_exclude,
-    FootprintIncludeGoal:    _check_footprint_include,
     ModularArithmeticGoal:   _check_modular,
     WriteFrameGoal:          _check_write_frame,
     TrajectoryInvariantGoal: _check_trajectory_invariant,

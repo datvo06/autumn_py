@@ -46,11 +46,6 @@ def test_spec_rejects_non_string_non_statevar_modifies_entries():
         Spec(modifies=(123,))  # type: ignore[arg-type]
 
 
-def test_spec_rejects_invalid_monotone_value():
-    with pytest.raises(ValueError, match="must be one of"):
-        Spec(monotone="grumpy")
-
-
 def test_spec_rejects_zero_horizon():
     with pytest.raises(ValueError, match="horizon must be >= 1"):
         Spec(horizon=0)

@@ -33,9 +33,6 @@ from typing import Any, Callable
 _pending_properties: list = []
 
 
-_VALID_MONOTONE = {"nondecreasing", "nonincreasing", "strict_increasing", "strict_decreasing"}
-
-
 @dataclass(frozen=True)
 class Spec:
     """A bundled spec for a next-clause or on-clause body.
@@ -72,9 +69,6 @@ class Spec:
     horizon : int | None
         Bounded model checking horizon for ``invariant``. ``None`` (the
         default) resolves to 6 at goal-mint time.
-    monotone : str | None
-        One of ``_VALID_MONOTONE``. (Future work — currently validated
-        but does not mint a goal.)
     trajectory_invariant : Callable[..., bool] | None
         Concrete-walk invariant: a lambda whose parameters are state-
         var names plus a final ``t`` (tick index). Same indexed-function
@@ -94,7 +88,6 @@ class Spec:
     unroll: tuple | None = None
     init_constraints: Callable[[Any], list] | None = None
     horizon: int | None = None
-    monotone: str | None = None
     trajectory_invariant: Callable[..., bool] | None = None
     trajectory_steps: int | None = None
 
@@ -125,11 +118,6 @@ class Spec:
                         f"Spec.unroll entries must be str or StateVar; "
                         f"got {type(u).__name__}: {u!r}"
                     )
-        if self.monotone is not None and self.monotone not in _VALID_MONOTONE:
-            raise ValueError(
-                f"Spec.monotone must be one of {sorted(_VALID_MONOTONE)}; "
-                f"got {self.monotone!r}"
-            )
         if self.horizon is not None and self.horizon < 1:
             raise ValueError(f"Spec.horizon must be >= 1; got {self.horizon}")
         if self.unroll is not None and self.invariant is None:
@@ -155,7 +143,6 @@ class Spec:
                 else self.init_constraints
             ),
             horizon=other.horizon if other.horizon is not None else self.horizon,
-            monotone=other.monotone if other.monotone is not None else self.monotone,
             trajectory_invariant=(
                 other.trajectory_invariant if other.trajectory_invariant is not None
                 else self.trajectory_invariant
@@ -276,5 +263,4 @@ def realize_spec_goals(spec_obj: Spec, anchor: str) -> list:
             predicate=spec_obj.trajectory_invariant,
             steps=spec_obj.trajectory_steps if spec_obj.trajectory_steps is not None else 10,
         ))
-    # spec_obj.monotone is validated but doesn't mint a goal yet — future work.
     return goals
