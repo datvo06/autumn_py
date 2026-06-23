@@ -231,6 +231,35 @@ def prev(ref) -> Any:
 
 
 # --------------------------------------------------------------------------
+# transition_of: the shared next-phase transition term.
+# --------------------------------------------------------------------------
+
+def transition_of(sv: "StateVar") -> Callable[[], Any]:
+    """The next-phase transition for state var ``sv``: evaluate its
+    next-clause and commit the result via the ``set_var`` op.
+
+    Single source of truth for "a next-clause's return value becomes
+    ``set_var(<var>, value)``". Both the runtime (next-phase commit) and
+    the gate (``select_ast`` for a ``.next`` anchor) run this exact
+    callable, so the term the gate analyses under ``read_set`` /
+    ``SmtCollectHandler`` is the term the runtime executes — gate soundness
+    is structural, not a coincidence of two hand-kept copies of the rule.
+    """
+    if sv._next_fn is None:
+        raise ValueError(f"state var {sv.name!r} has no next clause")
+    next_fn = sv._next_fn
+    name = sv.name
+
+    def transition() -> Any:
+        value = next_fn()
+        set_var(name, value)
+        return value
+
+    transition.__name__ = f"{name}_next_transition"
+    return transition
+
+
+# --------------------------------------------------------------------------
 # @on: register an on-clause.
 # --------------------------------------------------------------------------
 

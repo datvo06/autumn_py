@@ -74,6 +74,32 @@ def test_select_ast_resolves_next_clause_callable():
     assert callable(target)
 
 
+def test_select_ast_next_returns_the_shared_set_var_transition():
+    """E-1: select_ast('x.next') returns api.transition_of — the same term
+    the runtime runs. Executed under the state handler it commits x via the
+    set_var op, so the gate's footprint/SMT analysis sees the literal write
+    the runtime performs (not a re-derivation)."""
+    from effectful.ops.semantics import handler
+
+    from autumn_py import StateVar, prev, program
+    from autumn_py.handlers import PrevStateHandler, StateHandler
+
+    @program(grid_size=8)
+    class Counter:
+        x = StateVar(int, init=0)
+
+        @x.next
+        def _() -> int:
+            return prev(Counter.x) + 1
+
+    transition = select_ast(Counter, "x.next")
+    st = StateHandler()
+    st.write("x", 5)
+    with handler(st), handler(PrevStateHandler({"x": 5})):
+        transition()
+    assert st.get("x") == 6  # committed via set_var, exactly as the runtime would
+
+
 def test_select_ast_resolves_init_value():
     target = select_ast(SpaceInvadersR2OffByOne, "next_spawn_step.init")
     assert target == 4

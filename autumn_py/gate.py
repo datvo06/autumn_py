@@ -27,7 +27,7 @@ from typing import Any, Callable
 
 import z3
 
-from .ops import set_var
+from .api import transition_of
 from .smt import (
     SMT_SUPPORTED_TYPES,
     read_set,
@@ -132,11 +132,11 @@ class Residual:
 def select_ast(emit_cls: type, anchor: str) -> Any:
     """Resolve an anchor to a subterm of `emit_cls`'s `_autumn_spec`.
 
-    * ``"<state_var>.next"`` → a transition wrapper around the registered
-      `next`-clause callable: a zero-arg function that runs the clause
-      and emits ``set_var(<state_var>, value)`` with the return value.
-      Matches the runtime's next-clause-to-state-var commit so handlers
-      see the transition.
+    * ``"<state_var>.next"`` → ``api.transition_of(sv)``: the shared
+      zero-arg transition that runs the clause and emits
+      ``set_var(<state_var>, value)``. This is the *same* callable the
+      runtime executes in its next-phase, so the gate analyses the literal
+      term the runtime commits.
     * ``"<state_var>.init"`` → the StateVar's init value
     * ``"<state_var>"``      → the StateVar object itself
     """
@@ -149,9 +149,7 @@ def select_ast(emit_cls: type, anchor: str) -> Any:
         for sv in spec.state_vars:
             if sv.name == head:
                 if rest == "next":
-                    if sv._next_fn is None:
-                        raise ValueError(f"state var {head!r} has no next clause")
-                    return _wrap_as_transition(sv._next_fn, sv.name)
+                    return transition_of(sv)
                 if rest == "init":
                     return sv.initial_value()
                 raise ValueError(f"unknown anchor suffix {rest!r}")
@@ -161,16 +159,6 @@ def select_ast(emit_cls: type, anchor: str) -> Any:
         if sv.name == anchor:
             return sv
     raise KeyError(f"no state var {anchor!r} on {emit_cls.__name__}")
-
-
-def _wrap_as_transition(next_fn: Callable, var_name: str) -> Callable:
-    """Convert a return-style next-clause into a set_var-style transition,
-    matching the runtime's next-clause-to-commit semantics."""
-    def transition() -> None:
-        value = next_fn()
-        set_var(var_name, value)
-    transition.__name__ = f"{var_name}_next_transition"
-    return transition
 
 
 # --------------------------------------------------------------------------

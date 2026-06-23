@@ -5,7 +5,7 @@ from typing import Any
 
 from effectful.ops.semantics import handler
 
-from .api import ProgramSpec, TypeMismatch, _check_type
+from .api import ProgramSpec, TypeMismatch, _check_type, transition_of
 from .events import EVENT_NAMES
 from .handlers import (
     NativeRandomHandler,
@@ -151,9 +151,11 @@ class Runtime:
                     continue
                 if sv.name in self.state.on_writes_this_tick:
                     continue
-                value = sv._next_fn()
+                # Run the same transition term the gate analyses; the commit
+                # goes through the set_var op (StateHandler._set), so the gate
+                # certifies the literal write the runtime performs.
+                value = transition_of(sv)()
                 _check_type(value, sv.type_, context=f"next-expression of state var {sv.name!r}")
-                self.state.write(sv.name, value)
 
     def _drain_events(self) -> tuple[frozenset[str], tuple[int, int] | None]:
         active: set[str] = set()
