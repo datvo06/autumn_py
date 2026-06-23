@@ -24,8 +24,7 @@ function merge their fields. Last decorator wins on conflicts.
 """
 from __future__ import annotations
 
-import dataclasses
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 # Module-level pending list; @program drains into _autumn_spec.properties.
