@@ -372,30 +372,14 @@ def _check_modular(
 def _call_with_funcs(fn: Callable, funcs: dict, *trailing_args) -> Any:
     """Call ``fn`` with state-var Z3 functions bound by parameter name.
 
-    Two supported lambda shapes:
-
-    * **New form (preferred)** — parameters named after state vars:
-      ``lambda x, y, t: x(t+1) >= y(t)``. The gate inspects the
-      parameter names, looks up the matching Z3 function in ``funcs``,
-      and binds them. The last param (or all of them, for
-      ``init_constraints`` that takes no tick) gets ``*trailing_args``.
-
-    * **Legacy form** — first parameter is named ``funcs`` (literal):
-      ``lambda funcs, k: funcs["x"](k+1) >= funcs["y"](k)``. The gate
-      passes ``funcs`` as the first arg and ``*trailing_args`` after.
+    The lambda's leading parameters are named after state vars
+    (``lambda x, y, t: x(t+1) >= y(t)``); the gate looks each up in
+    ``funcs`` and binds it. Any trailing positional ``*trailing_args``
+    (e.g. the tick index) follow the bound functions.
     """
     sig = inspect.signature(fn)
     params = list(sig.parameters.keys())
-
-    # Legacy form: first param literally named "funcs" → pass dict directly.
-    if params and params[0] == "funcs":
-        return fn(funcs, *trailing_args)
-
-    # New form: leading params named after state vars; trailing positional
-    # args (e.g., the tick index) go after.
-    n_trailing = len(trailing_args)
-    sv_param_count = len(params) - n_trailing
-    sv_params = params[:sv_param_count]
+    sv_params = params[:len(params) - len(trailing_args)]
     bound = []
     for name in sv_params:
         if name not in funcs:

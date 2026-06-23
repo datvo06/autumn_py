@@ -108,7 +108,7 @@ def test_realize_spec_goals_modifies_mints_write_frame():
 
 
 def test_realize_spec_goals_invariant_mints_modular_arithmetic():
-    s = Spec(invariant=lambda funcs, k: funcs["x"](k) == k, horizon=4)
+    s = Spec(invariant=lambda x, k: x(k) == k, horizon=4)
     goals = realize_spec_goals(s, anchor="x.next")
     assert len(goals) == 1
     assert isinstance(goals[0], ModularArithmeticGoal)
@@ -322,12 +322,9 @@ def test_spec_with_invariant_runs_through_z3():
 
         @x.next
         @spec(
-            invariant=lambda funcs, k: funcs["x"](k + 1) == funcs["x"](k - 1) + 1,
+            invariant=lambda x, k: x(k + 1) == x(k - 1) + 1,
             unroll=("x.next",),
-            init_constraints=lambda funcs: [
-                funcs["x"](0) == 0,
-                funcs["x"](-1) == 0,
-            ],
+            init_constraints=lambda x: [x(0) == 0, x(-1) == 0],
             horizon=3,
         )
         def _() -> int:
@@ -369,12 +366,9 @@ def test_spec_unroll_accepts_statevar_refs():
 
         @x.next
         @spec(
-            invariant=lambda funcs, k: funcs["x"](k + 1) == funcs["x"](k - 1) + 1,
+            invariant=lambda x, k: x(k + 1) == x(k - 1) + 1,
             unroll=(x,),         # ← bare StateVar; resolves to "x.next"
-            init_constraints=lambda funcs: [
-                funcs["x"](0) == 0,
-                funcs["x"](-1) == 0,
-            ],
+            init_constraints=lambda x: [x(0) == 0, x(-1) == 0],
             horizon=3,
         )
         def _() -> int:

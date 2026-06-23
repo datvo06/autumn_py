@@ -46,17 +46,14 @@ def _phi_2_goal(emit_cls):
     """
     init_value = select_ast(emit_cls, "next_spawn_step.init")
 
-    def init_constraints(funcs):
-        step_count = funcs["step_count"]
-        next_spawn_step = funcs["next_spawn_step"]
+    def init_constraints(step_count, next_spawn_step):
         return [
             *(step_count(k) == k for k in range(8)),
             next_spawn_step(0) == init_value,
             next_spawn_step(-1) == init_value,
         ]
 
-    def goal_factory(funcs, k):
-        spawn_event = funcs["spawn_event"]
+    def goal_factory(spawn_event, k):
         return spawn_event(k + 1) == ((k % 15) == 3)
 
     return ModularArithmeticGoal(

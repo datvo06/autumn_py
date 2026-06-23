@@ -53,21 +53,22 @@ class Spec:
         Mints a ``WriteFrameGoal``. Entries may be strings or StateVar
         references — StateVar refs are resolved to ``.name`` at
         goal-mint time (after class-body's ``__set_name__`` binds names).
-    invariant : Callable[[FuncMap, int], z3.BoolRef] | None
-        SMT-checkable invariant: ``(funcs, k) -> Z3 BoolRef`` producing
-        the per-tick goal predicate at tick k. Conjoined across the
-        bounded horizon. Mints a ``ModularArithmeticGoal``. ``funcs``
-        is a dict-like keyed on either string state-var names *or*
-        StateVar references — both ``funcs["x"]`` and ``funcs[x]``
-        resolve to the same Z3 function.
+    invariant : Callable[..., z3.BoolRef] | None
+        SMT-checkable invariant. A lambda whose leading parameters are
+        named after state vars and whose final parameter is the tick
+        ``k``: ``lambda x, y, k: x(k + 1) >= y(k)``. The gate binds each
+        state-var parameter to its Z3 function and passes the tick last.
+        Conjoined across the bounded horizon; mints a
+        ``ModularArithmeticGoal``.
     unroll : tuple[str | StateVar, ...] | None
         Anchors whose transitions are unrolled by the SMT goal. Strings
         like ``"x.next"`` or bare StateVar references (which resolve to
         ``"<name>.next"``). Defaults to ``(self_anchor,)``. Used only
         with ``invariant``.
-    init_constraints : Callable[[FuncMap], list[z3.BoolRef]] | None
+    init_constraints : Callable[..., list[z3.BoolRef]] | None
         Z3 init constraints (state-var inits, prev-anchors, counters).
-        Used only with ``invariant``.
+        Same state-var-by-parameter-name binding as ``invariant``, but
+        with no trailing tick argument. Used only with ``invariant``.
     horizon : int
         Bounded model checking horizon for ``invariant``. Default 6.
     monotone : str | None
