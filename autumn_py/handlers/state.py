@@ -11,18 +11,16 @@ from ..ops import get_var, set_var
 class StateHandler(ObjectInterpretation):
     """Owns the live mutable environment for a Runtime instance.
 
-    Three distinct write paths, each with distinct tracking semantics:
+    Writes land in ``_globals`` two ways, distinguished only by whether
+    they mark ``on_writes_this_tick`` (which suppresses the matching
+    next-expression this tick):
 
-    * **seed** — init-phase, does not touch any overwrite set.
-    * **apply_buffered** — on-clause writes flushed at end of on-phase.
-      Populates ``on_writes_this_tick`` so the matching next-expr skips.
-    * **commit_next** — next-expr result committed at end of next-phase.
-      Does not touch ``on_writes_this_tick``.
-
-    Free-form ``set_var`` calls (e.g. inside next-expressions that do sibling
-    writes, which Autumn permits) go through ``_set`` and write directly to
-    state *without* populating ``on_writes_this_tick`` — matching the C++
-    semantics where only on-clause writes suppress the default next update.
+    * **untracked** — init seeding and next-expr commits (``write``), plus
+      free-form ``set_var`` from clause bodies (the ``_set`` op handler).
+      Autumn permits next-exprs to write sibling vars; as in the C++
+      semantics, those do not suppress the default next update.
+    * **tracked** — on-clause writes flushed at end of the on-phase
+      (``apply_buffered``), which add to ``on_writes_this_tick``.
     """
 
     def __init__(self) -> None:
@@ -47,12 +45,10 @@ class StateHandler(ObjectInterpretation):
 
     # --- Runtime-facing write API (bypasses the set_var op) -----------------
 
-    def seed(self, name: str, value: Any) -> None:
-        """Init-phase write."""
-        self._globals[name] = value
-
-    def commit_next(self, name: str, value: Any) -> None:
-        """Next-expr commit."""
+    def write(self, name: str, value: Any) -> None:
+        """Direct write used by the runtime for init seeding and next-expr
+        commits. Bypasses the ``set_var`` op and does not touch
+        ``on_writes_this_tick``."""
         self._globals[name] = value
 
     def apply_buffered(self, name: str, value: Any) -> None:

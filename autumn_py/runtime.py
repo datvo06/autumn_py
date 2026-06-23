@@ -77,7 +77,7 @@ class Runtime:
             assert sv.name is not None
             value = sv.initial_value()
             _check_type(value, sv.type_, context=f"initial value of state var {sv.name!r}")
-            self.state.seed(sv.name, value)
+            self.state.write(sv.name, value)
 
     def close(self) -> None:
         self._stack.close()
@@ -153,7 +153,7 @@ class Runtime:
                     continue
                 value = sv._next_fn()
                 _check_type(value, sv.type_, context=f"next-expression of state var {sv.name!r}")
-                self.state.commit_next(sv.name, value)
+                self.state.write(sv.name, value)
 
     def _drain_events(self) -> tuple[frozenset[str], tuple[int, int] | None]:
         active: set[str] = set()
