@@ -27,7 +27,6 @@ from autumn_py.ops import if_then_else
 from autumn_py.smt import (
     collect_smt,
     solve_against_goal,
-    to_smt_lib,
     unroll_transitions,
 )
 
@@ -57,16 +56,19 @@ def test_round_1_stochastic_emit_introduces_existential():
         state_var_specs={"next_spawn_step": int},
     )
 
-    # one domain constraint on rng_0, one universally-quantified transition
+    # one domain constraint on the existential, one universally-quantified
+    # transition
     assert len(constraints) == 2
 
-    smt = to_smt_lib(constraints)
-    # rng_0 has a range domain
-    assert "rng_0" in smt
-    # transition is universally quantified over t
-    assert "forall" in smt or "ForAll" in smt
-    # the function for next_spawn_step is declared
-    assert "next_spawn_step" in smt
+    # Assert meaning, not serializer text. Instantiate at a concrete tick
+    # (decidable): the spawned value is forced into the sampled domain
+    # [1, 20], yet is not pinned to any single value (a fresh existential).
+    next_spawn_step = funcs["next_spawn_step"]
+    assert solve_against_goal(
+        constraints,
+        z3.And(next_spawn_step(1) >= 1, next_spawn_step(1) <= 20),
+    ) is None
+    assert solve_against_goal(constraints, next_spawn_step(1) == 5) is not None
 
 
 # -------------------------------------------------------------------------
@@ -212,12 +214,15 @@ def test_set_var_records_transition_rule():
     )
     step_count = funcs["step_count"]
 
-    # Should be one universally-quantified transition
+    # One universally-quantified transition; assert its meaning at a concrete
+    # tick (decidable via instantiation) rather than the serializer's "forall"
+    # keyword: the recurrence step_count(t+1) == step_count(t-1)+1 is entailed.
+    # (No refutation control here: this constraint is a relational recurrence
+    # with no free constant, so Z3 returns `unknown` rather than a SAT model
+    # for a NOT-entailed goal; the round-2 tests cover refutation by unrolling
+    # the recurrence into ground constraints.)
     assert len(constraints) == 1
-    assert "forall" in to_smt_lib(constraints).lower()
-    # And it should mention step_count(t+1) and step_count(t-1)+1 in some form
-    smt = to_smt_lib(constraints)
-    assert "step_count" in smt
+    assert solve_against_goal(constraints, step_count(6) == step_count(4) + 1) is None
 
 
 # -------------------------------------------------------------------------
@@ -229,14 +234,18 @@ def test_sample_uniform_over_finite_list_emits_disjunction():
         c = sample_uniform([1, 2, 3, 4])
         set_var("color", c)
 
-    _, constraints, _ = collect_smt(
+    _, constraints, funcs = collect_smt(
         picks_color,
         state_var_specs={"color": int},
     )
-    smt = to_smt_lib(constraints)
-    # Disjunction of equalities
-    for v in (1, 2, 3, 4):
-        assert str(v) in smt
+    color = funcs["color"]
+    # At a concrete tick: color is a member of {1,2,3,4}, never outside it,
+    # and is not pinned to a single member.
+    assert solve_against_goal(
+        constraints, z3.Or(*[color(1) == v for v in (1, 2, 3, 4)])
+    ) is None
+    assert solve_against_goal(constraints, color(1) != 5) is None
+    assert solve_against_goal(constraints, color(1) == 1) is not None
 
 
 # -------------------------------------------------------------------------
@@ -348,13 +357,18 @@ def test_symbolic_handles_elif_via_nested_rewrites():
             new_val = 4
         set_var("step_count", new_val)
 
-    _, constraints, _ = collect_smt(
+    _, constraints, funcs = collect_smt(
         with_elif,
         state_var_specs={"step_count": int},
     )
-    smt = to_smt_lib(constraints)
-    # Three levels of nested ITEs
-    assert smt.count("ite") == 3
+    step_count = funcs["step_count"]
+    # The chained elif lowers to nested ITEs; assert branch selection at a
+    # concrete tick (0->1, 1->2, 2->3, else->4) rather than counting "ite"
+    # in the serializer output.
+    assert solve_against_goal(constraints, step_count(1) == z3.If(
+        step_count(0) == 0, 1, z3.If(
+            step_count(0) == 1, 2, z3.If(
+                step_count(0) == 2, 3, 4)))) is None
 
 
 def test_symbolic_handles_return_form_if_else():
@@ -388,13 +402,15 @@ def test_symbolic_handles_elif_in_call_form():
         else:
             set_var("step_count", 3)
 
-    _, constraints, _ = collect_smt(
+    _, constraints, funcs = collect_smt(
         with_elif_calls,
         state_var_specs={"step_count": int},
     )
+    step_count = funcs["step_count"]
     assert len(constraints) == 1
-    smt = to_smt_lib(constraints)
-    assert smt.count("ite") == 2
+    # 0->1, 1->2, else->3 at a concrete tick.
+    assert solve_against_goal(constraints, step_count(1) == z3.If(
+        step_count(0) == 0, 1, z3.If(step_count(0) == 1, 2, 3))) is None
 
 
 def test_symbolic_preserves_ground_execution_semantics():

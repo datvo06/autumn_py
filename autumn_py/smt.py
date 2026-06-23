@@ -358,20 +358,5 @@ def solve_against_goal(
     return None
 
 
-def to_smt_lib(
-    constraints: list[z3.BoolRef],
-    goal: z3.BoolRef | None = None,
-) -> str:
-    """Format constraints (and optionally the negation of `goal`) as an
-    SMT-LIB v2 problem string. The output is whatever Z3 produces from
-    its built-in serializer — the layout matches Z3's SMT-LIB output, not
-    the doc's hand-written figure verbatim, but the *content* is the same
-    constraint system."""
-    s = z3.Solver()
-    for c in constraints:
-        s.add(c)
-    if goal is not None:
-        s.add(z3.Not(goal))
-    return s.to_smt2()
 
 

@@ -28,7 +28,12 @@ from typing import Any, Callable
 import z3
 
 from .ops import set_var
-from .smt import SMT_SUPPORTED_TYPES, collect_smt, read_set, solve_against_goal
+from .smt import (
+    SMT_SUPPORTED_TYPES,
+    read_set,
+    solve_against_goal,
+    unroll_transitions,
+)
 
 
 # --------------------------------------------------------------------------
@@ -328,10 +333,9 @@ def _check_modular(
     funcs: dict[str, z3.FuncDeclRef] = {}
     for anchor in goal.unroll:
         target = select_ast(emit_cls, anchor)
-        for k in range(goal.horizon):
-            _, sub_cs, sub_funcs = collect_smt(target, specs, tick_value=k)
-            constraints.extend(sub_cs)
-            funcs.update(sub_funcs)
+        sub_cs, sub_funcs = unroll_transitions(target, specs, range(goal.horizon))
+        constraints.extend(sub_cs)
+        funcs.update(sub_funcs)
 
     constraints.extend(_call_with_funcs(goal.init_constraints, funcs))
     bounded_goal = z3.And(*[
