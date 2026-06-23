@@ -234,10 +234,11 @@ def transition_of(
     ``SmtCollectHandler`` is the term the runtime executes — gate soundness
     is structural, not a coincidence of two hand-kept copies of the rule.
 
-    ``validate``, if given, is called with the computed value *before* it is
-    committed; the runtime passes its type-check here so a mistyped
-    next-expression raises without mutating state. The gate omits it — a
-    symbolic value isn't a concrete instance to type-check.
+    ``validate``, if given, is called with the computed value *before* this
+    next-expression's value is committed; the runtime passes its type-check
+    here so a mistyped next-expression raises before its own commit (the var
+    keeps its prior value). The gate omits it — a symbolic value isn't a
+    concrete instance to type-check.
     """
     if sv._next_fn is None:
         raise ValueError(f"state var {sv.name!r} has no next clause")
