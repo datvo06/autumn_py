@@ -95,7 +95,7 @@ class StateVar(Generic[T]):
         self._next_fn: Callable[[], Any] | None = None
 
     def __set_name__(self, owner, name: str) -> None:
-        # Legacy descriptor form: capture name from class-attribute binding.
+        # Capture the state-var name from the class-attribute binding.
         if self.name is None:
             self.name = name
 
@@ -132,7 +132,7 @@ class StateVar(Generic[T]):
     def __index__(self):            return int(self.get())
     def __len__(self):              return len(self.get())
 
-    # --- legacy descriptor decorator methods (for backward compat) -------
+    # --- descriptor API: get / set / next / initializer -----------------
 
     def get(self) -> T:
         assert self.name is not None
@@ -221,7 +221,9 @@ def prev(ref) -> Any:
 # transition_of: the shared next-phase transition term.
 # --------------------------------------------------------------------------
 
-def transition_of(sv: "StateVar") -> Callable[[], Any]:
+def transition_of(
+    sv: "StateVar", *, validate: Callable[[Any], None] | None = None
+) -> Callable[[], Any]:
     """The next-phase transition for state var ``sv``: evaluate its
     next-clause and commit the result via the ``set_var`` op.
 
@@ -231,6 +233,11 @@ def transition_of(sv: "StateVar") -> Callable[[], Any]:
     callable, so the term the gate analyses under ``read_set`` /
     ``SmtCollectHandler`` is the term the runtime executes — gate soundness
     is structural, not a coincidence of two hand-kept copies of the rule.
+
+    ``validate``, if given, is called with the computed value *before* it is
+    committed; the runtime passes its type-check here so a mistyped
+    next-expression raises without mutating state. The gate omits it — a
+    symbolic value isn't a concrete instance to type-check.
     """
     if sv._next_fn is None:
         raise ValueError(f"state var {sv.name!r} has no next clause")
@@ -239,6 +246,8 @@ def transition_of(sv: "StateVar") -> Callable[[], Any]:
 
     def transition() -> Any:
         value = next_fn()
+        if validate is not None:
+            validate(value)
         set_var(name, value)
         return value
 

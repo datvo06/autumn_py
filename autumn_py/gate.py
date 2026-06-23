@@ -60,14 +60,16 @@ class ModularArithmeticGoal(Goal):
     """Bounded-model SMT check.
 
     ``unroll`` lists the next-clause anchors whose transitions are
-    instantiated across ``range(horizon)``; their accumulated
-    constraints are conjoined with ``init_constraints(funcs)`` and
-    checked against the conjunction of ``goal_factory(funcs, k)`` for
-    ``k`` in ``range(horizon)``.
+    instantiated across ``range(horizon)``; their accumulated constraints
+    are conjoined with ``init_constraints(...)`` and checked against the
+    conjunction of ``goal_factory(..., k)`` for ``k`` in ``range(horizon)``.
+    Both are lambdas whose leading parameters are named after state vars
+    (bound to their Z3 functions by ``_call_with_funcs``); ``goal_factory``
+    takes the tick ``k`` last.
     """
     unroll: tuple[str, ...]
-    init_constraints: Callable[[dict], list[z3.BoolRef]]
-    goal_factory: Callable[[dict, int], z3.BoolRef]
+    init_constraints: Callable[..., list[z3.BoolRef]]
+    goal_factory: Callable[..., z3.BoolRef]
     horizon: int = 6
 
 

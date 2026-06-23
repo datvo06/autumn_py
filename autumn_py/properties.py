@@ -83,9 +83,9 @@ class Spec:
     """
     no_stochastic: bool = False
     modifies: tuple | None = None
-    invariant: Callable[[Any, int], Any] | None = None
+    invariant: Callable[..., Any] | None = None
     unroll: tuple | None = None
-    init_constraints: Callable[[Any], list] | None = None
+    init_constraints: Callable[..., list] | None = None
     horizon: int | None = None
     trajectory_invariant: Callable[..., bool] | None = None
     trajectory_steps: int | None = None

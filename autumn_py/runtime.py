@@ -152,9 +152,17 @@ class Runtime:
                     continue
                 # Run the same transition term the gate analyses; the commit
                 # goes through the set_var op (StateHandler._set), so the gate
-                # certifies the literal write the runtime performs.
-                value = transition_of(sv)()
-                _check_type(value, sv.type_, context=f"next-expression of state var {sv.name!r}")
+                # certifies the literal write the runtime performs. The type
+                # check is injected as the transition's pre-commit validator,
+                # so a mistyped next-expression raises BEFORE committing — the
+                # state var is never left holding an ill-typed value.
+                transition_of(
+                    sv,
+                    validate=lambda v: _check_type(
+                        v, sv.type_,
+                        context=f"next-expression of state var {sv.name!r}",
+                    ),
+                )()
 
     def _drain_events(self) -> tuple[frozenset[str], tuple[int, int] | None]:
         active: set[str] = set()
