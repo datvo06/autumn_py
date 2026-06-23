@@ -69,8 +69,9 @@ class Spec:
         Z3 init constraints (state-var inits, prev-anchors, counters).
         Same state-var-by-parameter-name binding as ``invariant``, but
         with no trailing tick argument. Used only with ``invariant``.
-    horizon : int
-        Bounded model checking horizon for ``invariant``. Default 6.
+    horizon : int | None
+        Bounded model checking horizon for ``invariant``. ``None`` (the
+        default) resolves to 6 at goal-mint time.
     monotone : str | None
         One of ``_VALID_MONOTONE``. (Future work — currently validated
         but does not mint a goal.)
@@ -83,18 +84,19 @@ class Spec:
         ``_check_trajectory_invariant``, which runs the program for
         ``trajectory_steps`` ticks and verifies the predicate at every
         ``(snapshot[t], snapshot[t+1])`` pair.
-    trajectory_steps : int
-        Number of trajectory ticks to record before checking. Default 10.
+    trajectory_steps : int | None
+        Number of trajectory ticks to record before checking. ``None``
+        (the default) resolves to 10 at goal-mint time.
     """
     no_stochastic: bool = False
     modifies: tuple | None = None
     invariant: Callable[[Any, int], Any] | None = None
     unroll: tuple | None = None
     init_constraints: Callable[[Any], list] | None = None
-    horizon: int = 6
+    horizon: int | None = None
     monotone: str | None = None
     trajectory_invariant: Callable[..., bool] | None = None
-    trajectory_steps: int = 10
+    trajectory_steps: int | None = None
 
     def __post_init__(self) -> None:
         # Imported lazily to avoid circular import: properties → api → properties
@@ -128,14 +130,14 @@ class Spec:
                 f"Spec.monotone must be one of {sorted(_VALID_MONOTONE)}; "
                 f"got {self.monotone!r}"
             )
-        if self.horizon < 1:
+        if self.horizon is not None and self.horizon < 1:
             raise ValueError(f"Spec.horizon must be >= 1; got {self.horizon}")
         if self.unroll is not None and self.invariant is None:
             raise ValueError(
                 "Spec.unroll is only meaningful with an invariant; "
                 "received unroll without invariant"
             )
-        if self.trajectory_steps < 1:
+        if self.trajectory_steps is not None and self.trajectory_steps < 1:
             raise ValueError(
                 f"Spec.trajectory_steps must be >= 1; got {self.trajectory_steps}"
             )
@@ -152,14 +154,14 @@ class Spec:
                 other.init_constraints if other.init_constraints is not None
                 else self.init_constraints
             ),
-            horizon=other.horizon if other.horizon != 6 else self.horizon,
+            horizon=other.horizon if other.horizon is not None else self.horizon,
             monotone=other.monotone if other.monotone is not None else self.monotone,
             trajectory_invariant=(
                 other.trajectory_invariant if other.trajectory_invariant is not None
                 else self.trajectory_invariant
             ),
             trajectory_steps=(
-                other.trajectory_steps if other.trajectory_steps != 10
+                other.trajectory_steps if other.trajectory_steps is not None
                 else self.trajectory_steps
             ),
         )
@@ -266,13 +268,13 @@ def realize_spec_goals(spec_obj: Spec, anchor: str) -> list:
             unroll=resolved_unroll,
             init_constraints=spec_obj.init_constraints or (lambda *args: []),
             goal_factory=spec_obj.invariant,
-            horizon=spec_obj.horizon,
+            horizon=spec_obj.horizon if spec_obj.horizon is not None else 6,
         ))
     if spec_obj.trajectory_invariant is not None:
         goals.append(TrajectoryInvariantGoal(
             anchor=anchor,
             predicate=spec_obj.trajectory_invariant,
-            steps=spec_obj.trajectory_steps,
+            steps=spec_obj.trajectory_steps if spec_obj.trajectory_steps is not None else 10,
         ))
     # spec_obj.monotone is validated but doesn't mint a goal yet — future work.
     return goals

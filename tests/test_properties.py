@@ -86,6 +86,22 @@ def test_spec_merge_right_biased_on_conflict():
     assert merged.modifies == ("bar",)
 
 
+def test_spec_merge_preserves_explicitly_set_default_horizon():
+    """Regression: explicitly setting horizon/trajectory_steps to their
+    eventual default value must not be indistinguishable from 'unset'.
+    With None sentinels, an explicit override survives merge regardless
+    of its value; an unset (None) override leaves the base intact."""
+    base = Spec(horizon=3, invariant=lambda x, k: x(k) == k)
+    override = Spec(horizon=6, invariant=lambda x, k: x(k) == k)
+    assert base.merge(override).horizon == 6        # explicit 6 wins, not dropped
+    assert base.merge(Spec(invariant=lambda x, k: x(k) == k)).horizon == 3  # None → keep base
+
+    tbase = Spec(trajectory_invariant=lambda x, t: True, trajectory_steps=4)
+    tover = Spec(trajectory_invariant=lambda x, t: True, trajectory_steps=10)
+    assert tbase.merge(tover).trajectory_steps == 10
+    assert tbase.merge(Spec(trajectory_invariant=lambda x, t: True)).trajectory_steps == 4
+
+
 # -------------------------------------------------------------------------
 # realize_spec_goals: Spec → Goal subclass instances
 # -------------------------------------------------------------------------
