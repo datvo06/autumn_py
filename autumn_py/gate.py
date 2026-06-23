@@ -28,7 +28,7 @@ from typing import Any, Callable
 import z3
 
 from .ops import set_var
-from .smt import collect_smt, read_set, solve_against_goal
+from .smt import SMT_SUPPORTED_TYPES, collect_smt, read_set, solve_against_goal
 
 
 # --------------------------------------------------------------------------
@@ -172,14 +172,11 @@ def _wrap_as_transition(next_fn: Callable, var_name: str) -> Callable:
 # Spec extraction for SMT
 # --------------------------------------------------------------------------
 
-_SMT_SUPPORTED_TYPES: frozenset[type] = frozenset({int, bool})
-
-
 def _state_var_specs(emit_cls: type) -> dict[str, type]:
     """Build the SMT state-var specs from the program's spec.
 
-    Includes only state vars whose declared type is in
-    ``_SMT_SUPPORTED_TYPES`` (int/bool). State vars of other types
+    Includes only state vars whose declared type the SMT layer can lift
+    (``SMT_SUPPORTED_TYPES`` — int/bool). State vars of other types
     aren't dropped silently — they're absent from the specs, so any
     `set_var` on them under SmtCollectHandler raises a clear
     ``ValueError`` naming the undeclared variable.
@@ -188,7 +185,7 @@ def _state_var_specs(emit_cls: type) -> dict[str, type]:
     return {
         sv.name: sv.type_
         for sv in spec.state_vars
-        if sv.type_ in _SMT_SUPPORTED_TYPES
+        if sv.type_ in SMT_SUPPORTED_TYPES
     }
 
 

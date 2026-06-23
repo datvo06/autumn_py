@@ -49,8 +49,6 @@ def _check_type(value: Any, expected: Any, context: str) -> None:
     if isinstance(expected, type):
         if isinstance(value, expected):
             return
-        if value is None and expected in (object,):
-            return
         raise TypeMismatch(
             f"{context}: expected {expected.__name__}, "
             f"got {type(value).__name__} (value: {value!r})"
@@ -303,7 +301,7 @@ def obj(cls) -> Callable[..., ObjectInstance]:
     field_names = tuple(raw_annotations.keys())
     try:
         annotations = typing.get_type_hints(cls)
-    except Exception:
+    except (TypeError, NameError):
         annotations = raw_annotations
 
     cell_attr = cls.__dict__.get("cell")
@@ -375,7 +373,7 @@ def program(**config):
     def decorator(cls):
         try:
             annotations = typing.get_type_hints(cls)
-        except Exception:
+        except (TypeError, NameError):
             annotations = cls.__dict__.get("__annotations__") or {}
 
         state_vars: list[StateVar] = []
@@ -451,7 +449,7 @@ def _check_next_return_annotation(fn: Callable, sv: StateVar) -> None:
         return
     try:
         hints = typing.get_type_hints(fn)
-    except Exception:
+    except (TypeError, NameError):
         return
     ret = hints.get("return")
     if ret is None or ret is object or ret is Any:

@@ -56,6 +56,17 @@ from typing import Callable, NoReturn
 from .ops import if_then_else
 
 
+# Lifted calls resolve our op through this private global, injected into the
+# decorated function's own module namespace. A private name (not the bare
+# ``if_then_else``) means a user-defined ``if_then_else`` can neither silently
+# win nor be clobbered — closing the name-collision land mine. We bind into
+# the live module globals (not a copy) because @symbolic next-clauses
+# reference their enclosing @program class, which is bound only after the
+# class body finishes — i.e. after this decorator runs — so a snapshot taken
+# here would miss it.
+_IF_THEN_ELSE_GLOBAL = "__autumn_if_then_else__"
+
+
 class _SymbolicIfRewriter(ast.NodeTransformer):
     """AST transformer that lifts the supported `if/else` shapes into
     `if_then_else` op calls. See module docstring for the exact patterns."""
@@ -63,7 +74,7 @@ class _SymbolicIfRewriter(ast.NodeTransformer):
     def visit_IfExp(self, node: ast.IfExp) -> ast.AST:
         self.generic_visit(node)
         return ast.Call(
-            func=ast.Name(id="if_then_else", ctx=ast.Load()),
+            func=ast.Name(id=_IF_THEN_ELSE_GLOBAL, ctx=ast.Load()),
             args=[node.test, node.body, node.orelse],
             keywords=[],
         )
@@ -83,7 +94,7 @@ class _SymbolicIfRewriter(ast.NodeTransformer):
             return ast.Assign(
                 targets=[b.targets[0]],
                 value=ast.Call(
-                    func=ast.Name(id="if_then_else", ctx=ast.Load()),
+                    func=ast.Name(id=_IF_THEN_ELSE_GLOBAL, ctx=ast.Load()),
                     args=[node.test, b.value, o.value],
                     keywords=[],
                 ),
@@ -94,7 +105,7 @@ class _SymbolicIfRewriter(ast.NodeTransformer):
             assert b.value is not None and o.value is not None  # narrowed for mypy
             return ast.Return(
                 value=ast.Call(
-                    func=ast.Name(id="if_then_else", ctx=ast.Load()),
+                    func=ast.Name(id=_IF_THEN_ELSE_GLOBAL, ctx=ast.Load()),
                     args=[node.test, b.value, o.value],
                     keywords=[],
                 )
@@ -131,7 +142,7 @@ class _SymbolicIfRewriter(ast.NodeTransformer):
                         )
                     new_args.append(
                         ast.Call(
-                            func=ast.Name(id="if_then_else", ctx=ast.Load()),
+                            func=ast.Name(id=_IF_THEN_ELSE_GLOBAL, ctx=ast.Load()),
                             args=[node.test, ba, oa],
                             keywords=[],
                         )
@@ -176,7 +187,7 @@ def symbolic(fn: Callable) -> Callable:
     code = compile(new_tree, fn.__code__.co_filename, "exec")
 
     ns = fn.__globals__
-    ns.setdefault("if_then_else", if_then_else)
+    ns[_IF_THEN_ELSE_GLOBAL] = if_then_else  # unconditional; private name can't collide
     local_ns: dict = {}
     exec(code, ns, local_ns)
     return local_ns[fn.__name__]

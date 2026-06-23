@@ -58,6 +58,9 @@ _SORT_OF: dict[type, z3.SortRef] = {
     bool: z3.BoolSort(),
 }
 
+# Single source of truth for which Python types the SMT layer can lift.
+SMT_SUPPORTED_TYPES: frozenset[type] = frozenset(_SORT_OF)
+
 
 def _z3_sort(py_type: type) -> z3.SortRef:
     if py_type in _SORT_OF:
