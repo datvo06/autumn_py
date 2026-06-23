@@ -1,4 +1,4 @@
-from .api import AutumnObj, StateVar, field, next_clause, obj, on, prev, program
+from .api import AutumnObj, StateVar, field, obj, on, prev, program
 from .events import clicked, click, down, left, right, up
 from .properties import modifies, no_stochastic, spec
 from .runtime import Runtime
@@ -12,7 +12,6 @@ __all__ = [
     "obj",
     "AutumnObj",
     "StateVar",
-    "next_clause",
     "field",
     "spec",
     "modifies",

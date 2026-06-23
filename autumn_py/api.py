@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import typing
-from dataclasses import MISSING, dataclass
+from dataclasses import dataclass
 from dataclasses import field as field
 from typing import Any, Callable, Generic, TypeVar, dataclass_transform
 
@@ -65,39 +65,21 @@ class StateVar(Generic[T]):
     """Spec record for a state-variable declaration, generic in the
     value type ``T``.
 
-    Two construction paths, both supported:
-
-    * **Annotation form (preferred for synth-emit; LLM-natural; mypy-clean):**
-
-        @program(grid_size=16)
-        class MyGame:
-            step_count: StateVar[int] = 0
-            enemies: StateVar[list] = field(default_factory=list)
-
-        @program walks ``cls.__annotations__`` and ``cls.__dict__`` to
-        mint StateVar entries. The annotation ``StateVar[T]`` tells the
-        type-checker that the post-decoration class attribute is a
-        ``StateVar[T]`` (not the bare default's type), so ``.get()``,
-        ``.set(v)``, and ``prev(MyGame.x)`` all type-check correctly.
-        Next-clauses are registered via ``@next_clause("name") def _():``.
-
-    * **Legacy descriptor form (kept for compatibility):**
+    Declared in a ``@program`` class body as a descriptor::
 
         @program(grid_size=16)
         class MyGame:
             step_count = StateVar(int, init=0)
+            enemies = StateVar(list, init=[])
 
             @step_count.next
             def _():
                 return prev(MyGame.step_count) + 1
 
-        StateVar instances in the class body are descriptors with
-        ``.next`` and ``.initializer`` decorator methods.
-
-    The two forms produce identical internal spec records; the runtime
-    iterates them the same way. The annotation form is preferred —
-    it's the syntax LLMs are saturated on (``@dataclass``, ``@attrs``,
-    Pydantic) and avoids the autumn-specific wrapper class.
+    ``.next`` registers the var's next-expression; ``.initializer``
+    registers a (possibly effect-using) initializer. The generic
+    parameter ``T`` flows through ``.get()``, ``.set(v)`` and
+    ``prev(MyGame.x)`` so type-checkers track the value type.
     """
 
     def __init__(
@@ -118,12 +100,6 @@ class StateVar(Generic[T]):
         # Legacy descriptor form: capture name from class-attribute binding.
         if self.name is None:
             self.name = name
-
-    def __class_getitem__(cls, item):
-        # Permit ``StateVar[int]`` as an annotation. Returns a generic alias
-        # so type-checkers can carry the parameter through; at runtime the
-        # alias is callable (returns this class) for `isinstance` checks.
-        return typing._GenericAlias(cls, (item,))  # type: ignore[attr-defined]
 
     def __repr__(self) -> str:
         return f"StateVar({self.name!r})"
@@ -182,8 +158,7 @@ class StateVar(Generic[T]):
         set_var(self.name, value)
 
     def next(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """Legacy: ``@<sv>.next def _(): ...``. Modern equivalent is
-        ``@next_clause("<name>") def _(): ...``.
+        """``@<sv>.next def _(): ...`` — register the var's next-expression.
 
         Spec metadata attached via ``@spec(...)``/``@modifies(...)``/
         ``@no_stochastic`` is preserved on ``fn.__autumn_spec__`` and
@@ -195,8 +170,8 @@ class StateVar(Generic[T]):
         return fn
 
     def initializer(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """Legacy: ``@<sv>.initializer def _(): ...``. Modern equivalent
-        is ``field(default_factory=fn)`` in the class body."""
+        """``@<sv>.initializer def _(): ...`` — register an initializer
+        that runs under the handler stack (e.g. to construct objects)."""
         if self.type_ is not None and self.type_ is not object:
             hints: dict = {}
             try:
@@ -255,37 +230,6 @@ def prev(ref) -> Any:
             )
         return get_prev_var(ref.name)
     raise TypeError(f"prev() expects a str or StateVar, got {type(ref).__name__}")
-
-
-# --------------------------------------------------------------------------
-# next_clause: decorator to register a state var's next-expression
-# --------------------------------------------------------------------------
-
-_pending_next_clauses: list[tuple[str, Callable[[], Any]]] = []
-
-
-def next_clause(name: str):
-    """Register the decorated function as the next-expression for the
-    state variable named ``name``. The decorator records the (name, fn)
-    pair on a module-level pending list which ``@program`` drains when
-    the class body finishes executing.
-
-    Usage::
-
-        @program(grid_size=16)
-        class MyGame:
-            step_count: int = 0
-
-            @next_clause("step_count")
-            def _():
-                return prev("step_count") + 1
-    """
-
-    def decorator(fn: Callable[[], Any]) -> Callable[[], Any]:
-        _pending_next_clauses.append((name, fn))
-        return fn
-
-    return decorator
 
 
 # --------------------------------------------------------------------------
@@ -409,36 +353,23 @@ def obj(cls) -> Callable[..., ObjectInstance]:
 # @program: walks class-body annotations + defaults to build the spec.
 # --------------------------------------------------------------------------
 
-# Sentinel marker: if the class body has no default for an annotated state
-# var, we use this to indicate "must be supplied via @initializer (not yet
-# implemented in pure-defop mode)" — but for ordinary StateVar use, every
-# attribute has a default.
-_MISSING = object()
-
-
 @dataclass_transform(field_specifiers=(field,))
 def program(**config):
-    """Class decorator. Reads class-body annotations + defaults to mint
-    state-var specs; drains pending @next_clause and @on registrations
-    into ``cls._autumn_spec``.
-
-    The class body declares state vars as ordinary annotated attributes::
+    """Class decorator. Collects the ``StateVar`` descriptors declared in
+    the class body and drains pending ``@on`` registrations into
+    ``cls._autumn_spec``::
 
         @program(grid_size=16)
         class MyGame:
-            step_count: int = 0
-            enemies: list = field(default_factory=list)
-            player: Player = field(default_factory=lambda: Player(Position(8, 14)))
+            step_count = StateVar(int, init=0)
+            enemies = StateVar(list, init=[])
 
-    The ``field(default_factory=...)`` re-export from ``dataclasses``
-    handles the mutable-default and effect-requiring-init cases.
+            @step_count.next
+            def _():
+                return prev(MyGame.step_count) + 1
 
-    Next-clauses are registered by name (string anchor) since the class
-    attributes aren't descriptors anymore::
-
-        @next_clause("step_count")
-        def _():
-            return prev("step_count") + 1
+    Annotated attributes that aren't ``StateVar`` instances are rejected,
+    so it is unambiguous what's a state var vs. a class-level constant.
     """
 
     def decorator(cls):
@@ -477,20 +408,6 @@ def program(**config):
                 f"For non-state-var class attributes, omit the annotation."
             )
 
-        # Bind pending next-clauses (modern @next_clause(name) form).
-        by_name = {sv.name: sv for sv in state_vars}
-        for nc_name, nc_fn in _pending_next_clauses:
-            if nc_name not in by_name:
-                raise NameError(
-                    f"@next_clause({nc_name!r}) on {cls.__name__}: "
-                    f"no state variable named {nc_name!r} declared. "
-                    f"Available: {sorted(by_name)}"
-                )
-            sv = by_name[nc_name]
-            _check_next_return_annotation(nc_fn, sv)
-            sv._next_fn = nc_fn
-        _pending_next_clauses.clear()
-
         # Materialise spec goals from any `__autumn_spec__` attached to
         # next-clause bodies. Done here (not at @<sv>.next decoration
         # time) because StateVar names bind during class-body finalisation
@@ -527,33 +444,6 @@ def program(**config):
     return decorator
 
 
-def _build_state_var(name: str, ty: Any, default: Any) -> StateVar:
-    """Construct a StateVar spec from a class-body declaration.
-
-    Annotation forms accepted:
-    * ``step_count: int = 0``               — plain type
-    * ``step_count: StateVar[int] = 0``     — generic StateVar wrapper
-    * ``enemies: StateVar[list] = field(default_factory=list)``  — with factory
-
-    For ``StateVar[T]`` annotations, the inner ``T`` is extracted as the
-    state var's value-type (used for runtime type checking via
-    ``_check_type``).
-    """
-    # If annotation is StateVar[T], unwrap to T for the spec's type_.
-    origin = typing.get_origin(ty)
-    if origin is StateVar:
-        args = typing.get_args(ty)
-        if args:
-            ty = args[0]
-
-    # dataclasses.field returns a Field; its default may be MISSING.
-    if hasattr(default, "default_factory") and default.default_factory is not MISSING:
-        return StateVar(name=name, type_=ty, init_fn=default.default_factory)
-    if hasattr(default, "default") and default.default is not MISSING:
-        return StateVar(name=name, type_=ty, init=default.default)
-    return StateVar(name=name, type_=ty, init=default)
-
-
 def _check_next_return_annotation(fn: Callable, sv: StateVar) -> None:
     """If the next-clause function has a return annotation, check it's
     compatible with the state var's declared type."""
@@ -573,7 +463,7 @@ def _check_next_return_annotation(fn: Callable, sv: StateVar) -> None:
     if sv_origin is not None and sv_origin is ret_origin:
         return
     raise TypeMismatch(
-        f"@next_clause({sv.name!r}): function return type "
+        f"@{sv.name}.next: function return type "
         f"{getattr(ret, '__name__', ret)!r} does not match "
         f"declared type {getattr(sv.type_, '__name__', sv.type_)!r}"
     )

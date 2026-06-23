@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 # Module-level pending list; @program drains into _autumn_spec.properties.
-# Same pattern as _pending_on_clauses / _pending_next_clauses in api.py.
+# Same pattern as _pending_on_clauses in api.py.
 _pending_properties: list = []
 
 
