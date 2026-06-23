@@ -18,7 +18,7 @@ from .handlers import (
     make_event_intp,
 )
 from .ops import emit_render_cell
-from .values import ObjectInstance, cell_to_dict
+from .values import cell_to_dict, iter_alive_instances
 
 
 class Runtime:
@@ -182,18 +182,7 @@ class Runtime:
         for sv in self.spec.state_vars:
             if not self.state.has(sv.name):
                 continue
-            for inst in _iter_instances(self.state.get(sv.name)):
-                if not inst.alive:
-                    continue
+            for inst in iter_alive_instances(self.state.get(sv.name)):
                 for cell in inst.rendered_cells():
                     emit_render_cell(cell)
         return [cell_to_dict(c) for c in self.render.cells]
-
-
-def _iter_instances(value: Any):
-    if isinstance(value, ObjectInstance):
-        yield value
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            if isinstance(v, ObjectInstance):
-                yield v
