@@ -73,13 +73,10 @@ def _z3_sort(py_type: type) -> z3.SortRef:
 # --------------------------------------------------------------------------
 
 class SmtCollectHandler(ObjectInterpretation):
-    """Reinterprets autumn ops as Z3 symbolic-expression construction.
-
-    State vars are encoded as time-indexed functions; the handler's
-    symbolic tick `t` is universally quantified at finalization. Free
-    existentials (``sample_uniform``, ``alloc_obj_id``) are minted as
-    fresh Z3 constants with their domain assertions accumulated.
-    """
+    """Reinterprets autumn ops as Z3 symbolic-expression construction (see
+    the module docstring for the time-indexed-function encoding). Free
+    existentials (``sample_uniform``, ``alloc_obj_id``) are minted as fresh
+    Z3 constants with their domain assertions accumulated."""
 
     def __init__(
         self,

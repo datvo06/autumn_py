@@ -107,24 +107,11 @@ class StateVar(Generic[T]):
             return self.init_fn()
         return self.init
 
-    # --- transparent value access: arithmetic / coercion / comparison on
-    # the StateVar object delegates to .get() (which calls get_var, which
-    # flows through the installed handler stack). The user can write
-    # ``MyClass.step_count + 1`` and it Just Works:
-    #
-    #   * Under Runtime → StateHandler returns the concrete int → `+ 1` is
-    #     normal Python arithmetic.
-    #   * Under SmtCollectHandler → returns a Z3 expression → `+ 1`
-    #     produces a Z3 expression (Z3 overloads operators).
-    #   * Under read_set → the get_var atom is recorded via the .get()
-    #     call, then the auto-arithmetic happens on the returned term.
-    #
-    # In all three cases the underlying get_var op is invoked, so the
-    # term/reducibility property is preserved. No silent failure where
-    # the StateVar object itself sneaks into arithmetic / boolean tests.
-    #
-    # __eq__ / __hash__ are NOT overridden — they stay as Python defaults
-    # (identity-based) so StateVar remains hashable and dict/set-keyable.
+    # Arithmetic / comparison / coercion delegate to .get(), so the value
+    # flows through the installed handler stack (concrete int, Z3 expr, or a
+    # recorded get_var atom) rather than the StateVar object itself sneaking
+    # into the expression. __eq__ / __hash__ are deliberately left as Python
+    # identity defaults so StateVar stays hashable / dict-keyable.
 
     def __add__(self, other):       return self.get() + other
     def __radd__(self, other):      return other + self.get()
