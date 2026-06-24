@@ -19,3 +19,11 @@ smt = ["z3-solver>=4.13"]
 [tool.setuptools.packages.find]
 include = ["autumn_py*"]
 exclude = ["tests*", "examples*"]
+
+[tool.pylint.messages_control]
+# The @program class body is a registration scope, not a method namespace.
+# `def _():` is the canonical form for a next-clause / on-clause / initializer
+# body — the decorator stores the function and the runtime invokes it
+# zero-arg. Suppressing these two rules globally avoids per-line noise
+# across every example.
+disable = ["no-method-argument", "no-self-argument"]

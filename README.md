@@ -121,7 +121,7 @@ The structural list combinators are effects too: `map_op`, `filter_op`,
 `addObj` / `removeObj` / `updateObj` are plain Python compositions of them.
 That keeps the kernel small — `TypeOfHandler` and any future symbolic /
 reduction handler only need to interpret the combinators, not every
-Autumn-named primitive — and lines up with §6.1.1 of the PL writeup
+Autumn-named primitive — and lines up with §6.1.1 of the synthesis writeup
 (MAP-DECOMP / FILTER-DECOMP / ADD-DECOMP), where the inference pipeline
 decomposes the higher-level list rules into the same kernel.
 
@@ -175,7 +175,7 @@ tests/                 47 tests covering laws + per-env smoke
 - **No symbolic / trace / replay modes wired up yet.** The `NotHandled`
   discipline keeps that door open; stubs in `modes.py` will fill in.
 - **Lightweight type checker.** We enforce Autumn's `(: x T)` annotations
-  along the load-bearing axes of §2 of the PL writeup:
+  along the load-bearing axes of §2 of the base PL writeup:
   - **State-var init values, `@obj` field values, initializer + next-expression return values** — runtime isinstance checks.
   - **Parameterised lists (`list[T]`)** — element-wise checked.
   - **`@obj` classes** — instance must match the declared factory's spec.
