@@ -253,19 +253,12 @@ def read_set(
     * ``("sample_uniform",)`` — stochastic draw.
     * ``("is_event_active", event_name)`` — event-activation read.
 
-    Implementation: run ``fn`` under ``SmtCollectHandler`` and harvest its
-    ``atoms`` accumulator. Each handler method appends its atom, so the
-    accumulator reflects every op the clause ran.
-
-    The clause must be symbolically evaluable end-to-end. read_set does not
-    swallow exceptions: a clause that uses native ``if`` / ``bool()`` on a
-    symbolic value (raising ``z3.Z3Exception``) or calls an op with no
-    symbolic interpretation (raising ``NotHandled``) propagates the error
-    rather than returning a *partial* — and therefore unsound — footprint
-    (a missed ``sample_uniform`` / ``set_var`` past the failure point would
-    false-pass a ``no_stochastic`` / ``modifies`` goal). Decorate such
-    clauses with ``@symbolic`` (which lifts ``if`` into ``if_then_else``),
-    or extend ``SmtCollectHandler`` to interpret the op.
+    Runs ``fn`` under ``SmtCollectHandler`` and returns its ``atoms``
+    accumulator. It swallows nothing: the clause must be symbolically
+    evaluable end-to-end, otherwise the raise propagates rather than yielding
+    a partial (unsound) footprint — native ``if`` on a symbolic value must
+    use ``@symbolic`` / ``if_then_else``. See
+    ``drafts/refactor-design-notes.md``.
 
     `state_var_specs` defaults to an empty dict — undeclared names get
     fresh existentials, which is fine for footprint analysis since we only

@@ -107,11 +107,9 @@ class StateVar(Generic[T]):
             return self.init_fn()
         return self.init
 
-    # Arithmetic / comparison / coercion delegate to .get(), so the value
-    # flows through the installed handler stack (concrete int, Z3 expr, or a
-    # recorded get_var atom) rather than the StateVar object itself sneaking
-    # into the expression. __eq__ / __hash__ are deliberately left as Python
-    # identity defaults so StateVar stays hashable / dict-keyable.
+    # Arithmetic / comparison / coercion delegate to .get() so the value flows
+    # through the handler stack, not the StateVar object. __eq__ / __hash__ are
+    # left as identity defaults so StateVar stays hashable / dict-keyable.
 
     def __add__(self, other):       return self.get() + other
     def __radd__(self, other):      return other + self.get()
@@ -224,21 +222,15 @@ def prev(ref) -> Any:
 def transition_of(
     sv: "StateVar", *, validate: Callable[[Any], None] | None = None
 ) -> Callable[[], Any]:
-    """The next-phase transition for state var ``sv``: evaluate its
-    next-clause and commit the result via the ``set_var`` op.
+    """The next-phase transition for ``sv``: evaluate its next-clause and
+    commit the result via the ``set_var`` op. The single definition both the
+    runtime and the gate (``select_ast`` for ``.next``) run, so the gate
+    analyses the term the runtime executes.
 
-    Single source of truth for "a next-clause's return value becomes
-    ``set_var(<var>, value)``". Both the runtime (next-phase commit) and
-    the gate (``select_ast`` for a ``.next`` anchor) run this exact
-    callable, so the term the gate analyses under ``read_set`` /
-    ``SmtCollectHandler`` is the term the runtime executes — gate soundness
-    is structural, not a coincidence of two hand-kept copies of the rule.
-
-    ``validate``, if given, is called with the computed value *before* this
-    next-expression's value is committed; the runtime passes its type-check
-    here so a mistyped next-expression raises before its own commit (the var
-    keeps its prior value). The gate omits it — a symbolic value isn't a
-    concrete instance to type-check.
+    ``validate``, if given, runs on the value before it is committed — the
+    runtime passes its type-check, so a mistyped next-expression raises
+    before committing; the gate omits it. See
+    ``drafts/refactor-design-notes.md``.
     """
     if sv._next_fn is None:
         raise ValueError(f"state var {sv.name!r} has no next clause")

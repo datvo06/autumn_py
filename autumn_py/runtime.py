@@ -150,12 +150,7 @@ class Runtime:
                     continue
                 if sv.name in self.state.on_writes_this_tick:
                     continue
-                # Run the same transition term the gate analyses; the commit
-                # goes through the set_var op (StateHandler._set), so the gate
-                # certifies the literal write the runtime performs. The type
-                # check is injected as the transition's pre-commit validator,
-                # so a mistyped next-expression raises BEFORE committing — the
-                # state var is never left holding an ill-typed value.
+                # Shared transition term; type-check runs pre-commit (validate).
                 transition_of(
                     sv,
                     validate=lambda v: _check_type(
