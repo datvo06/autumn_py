@@ -324,7 +324,7 @@ def adjacentObjs(obj: ObjectInstance, unit_size: int) -> list[ObjectInstance]:
 
 def uniformChoice(xs):
     """Sample uniformly from `xs`. Dispatches to `sample_uniform`; under
-    TypeOfHandler this returns the element type (closes the §2.2 gap)."""
+    TypeOfHandler this returns the element type."""
     if isinstance(xs, (list, tuple)):
         return sample_uniform(tuple(xs))
     return sample_uniform(xs)

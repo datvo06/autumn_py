@@ -1,24 +1,12 @@
 """Round-kernel gate for the synthesis loop.
 
-The gate consumes (1) a `@program`-decorated emit class and (2) a list
-of typed `Goal` subclass instances, and returns the list of residuals
-naming the goals the emit failed.
-
-Concrete instantiation of `drafts/autumn-pl-handlers-and-properties.md`
-Part 1 D4. Each goal subclass carries shape-specific fields; dispatch
-is by `isinstance`. Each checker returns ``Residual | None`` —
-``None`` means the goal passed.
-
-Currently implemented goal shapes:
-
-* :class:`FootprintExcludeGoal` / :class:`FootprintIncludeGoal` —
-  syntactic-dependency checks against the read-set (P_1, P_4, P_6,
-  P_8, P_12 in the doc).
-* :class:`ModularArithmeticGoal` — bounded-model SMT check via
-  ``autumn_py.smt.collect_smt`` and ``solve_against_goal`` (P_3, P_11).
-
-Library-conditional shapes (invariant, existential) wait on the typed
-goal/idiom library described in §2.5 of the draft.
+``gate(emit_cls, goals)`` checks each typed ``Goal`` against a
+``@program``-decorated emit and returns the residuals (the goals it failed).
+Dispatch is by ``isinstance`` (``_CHECKERS``); each checker returns
+``Residual | None``. Goal shapes: ``FootprintExclude`` (read-set check),
+``ModularArithmetic`` (bounded SMT), ``WriteFrame`` (write-set ⊆ allowed),
+``TrajectoryInvariant`` (concrete walk). See
+``drafts/autumn-pl-handlers-and-properties.md`` Part 1 D4.
 """
 from __future__ import annotations
 
@@ -28,8 +16,13 @@ from typing import Any, Callable
 
 import z3
 
-from .ops import set_var
-from .smt import collect_smt, read_set, solve_against_goal
+from .api import transition_of
+from .smt import (
+    SMT_SUPPORTED_TYPES,
+    read_set,
+    solve_against_goal,
+    unroll_transitions,
+)
 
 
 # --------------------------------------------------------------------------
@@ -52,25 +45,20 @@ class FootprintExcludeGoal(Goal):
 
 
 @dataclass(frozen=True)
-class FootprintIncludeGoal(Goal):
-    """The lambda at ``anchor``'s read-set must contain at least one
-    atom matching each pattern in ``include``."""
-    include: tuple[tuple, ...]
-
-
-@dataclass(frozen=True)
 class ModularArithmeticGoal(Goal):
     """Bounded-model SMT check.
 
     ``unroll`` lists the next-clause anchors whose transitions are
-    instantiated across ``range(horizon)``; their accumulated
-    constraints are conjoined with ``init_constraints(funcs)`` and
-    checked against the conjunction of ``goal_factory(funcs, k)`` for
-    ``k`` in ``range(horizon)``.
+    instantiated across ``range(horizon)``; their accumulated constraints
+    are conjoined with ``init_constraints(...)`` and checked against the
+    conjunction of ``goal_factory(..., k)`` for ``k`` in ``range(horizon)``.
+    Both are lambdas whose leading parameters are named after state vars
+    (bound to their Z3 functions by ``_call_with_funcs``); ``goal_factory``
+    takes the tick ``k`` last.
     """
     unroll: tuple[str, ...]
-    init_constraints: Callable[[dict], list[z3.BoolRef]]
-    goal_factory: Callable[[dict, int], z3.BoolRef]
+    init_constraints: Callable[..., list[z3.BoolRef]]
+    goal_factory: Callable[..., z3.BoolRef]
     horizon: int = 6
 
 
@@ -78,21 +66,14 @@ class ModularArithmeticGoal(Goal):
 class TrajectoryInvariantGoal(Goal):
     """Concrete-trajectory invariant.
 
-    Walks the program for ``steps`` ticks under the live runtime stack,
-    capturing a snapshot of every state var before and after each tick.
-    For each ``t`` in ``range(steps)``, ``predicate`` is invoked with
-    each state-var name bound to a per-tick lookup function so the
-    lambda body can index by tick:
+    Walks the program for ``steps`` ticks, snapshotting every state var.
+    ``predicate`` is called per tick with each state-var name bound to a
+    per-tick lookup and a final ``t`` (indices clamp to the recorded range)::
 
-        ``lambda ant, food, t: dist(ant(t+1), food(t)) <= dist(ant(t), food(t))``
+        lambda ant, food, t: dist(ant(t+1), food(t)) <= dist(ant(t), food(t))
 
-    Same indexed-function shape as :class:`ModularArithmeticGoal`'s
-    ``invariant``, but resolved against recorded snapshots (concrete
-    Python values) rather than Z3 functions. Tick indices clamp to the
-    recorded range — out-of-range reads return the boundary snapshot.
-
-    A residual is returned on the first ``t`` at which ``predicate``
-    returns falsy; the witness is ``{"t": t, "snapshot": snapshots[t]}``.
+    Returns a residual on the first failing ``t``; witness is
+    ``{"t": t, "snapshot": snapshots[t]}``.
     """
     predicate: Callable[..., Any]
     steps: int = 10
@@ -100,19 +81,11 @@ class TrajectoryInvariantGoal(Goal):
 
 @dataclass(frozen=True)
 class WriteFrameGoal(Goal):
-    """The decorated body's write-set must be a subset of
-    ``allowed_writes`` (plus the implicitly-allowed state var the
-    body is the next-clause for: e.g., ``foo.next``'s write to ``foo``
-    is always allowed).
-
-    Catches the silent-aliasing failure mode: a next-clause for
-    ``step_count`` accidentally writes to ``next_spawn_step``. Today's
-    runtime would silently let the side-write through; this goal
-    surfaces it as a residual at gate time.
-
-    Implementation: runs the next-clause under ``read_set`` (which
-    records ``("set_var", name)`` atoms for every write); checks the
-    write-set against ``allowed_writes ∪ {self_var}``.
+    """The decorated body's write-set must be ⊆ ``allowed_writes`` plus the
+    state var it is the next-clause for (``foo.next`` may always write
+    ``foo``) — catches a next-clause that accidentally writes a sibling var.
+    Checked by running it under ``read_set`` and comparing the
+    ``("set_var", name)`` atoms against ``allowed_writes ∪ {self_var}``.
     """
     allowed_writes: tuple[str, ...]
 
@@ -135,11 +108,11 @@ class Residual:
 def select_ast(emit_cls: type, anchor: str) -> Any:
     """Resolve an anchor to a subterm of `emit_cls`'s `_autumn_spec`.
 
-    * ``"<state_var>.next"`` → a transition wrapper around the registered
-      `next`-clause callable: a zero-arg function that runs the clause
-      and emits ``set_var(<state_var>, value)`` with the return value.
-      Matches the runtime's next-clause-to-state-var commit so handlers
-      see the transition.
+    * ``"<state_var>.next"`` → ``api.transition_of(sv)``: the shared
+      zero-arg transition that runs the clause and emits
+      ``set_var(<state_var>, value)``. This is the *same* callable the
+      runtime executes in its next-phase, so the gate analyses the literal
+      term the runtime commits.
     * ``"<state_var>.init"`` → the StateVar's init value
     * ``"<state_var>"``      → the StateVar object itself
     """
@@ -152,9 +125,7 @@ def select_ast(emit_cls: type, anchor: str) -> Any:
         for sv in spec.state_vars:
             if sv.name == head:
                 if rest == "next":
-                    if sv._next_fn is None:
-                        raise ValueError(f"state var {head!r} has no next clause")
-                    return _wrap_as_transition(sv._next_fn, sv.name)
+                    return transition_of(sv)
                 if rest == "init":
                     return sv.initial_value()
                 raise ValueError(f"unknown anchor suffix {rest!r}")
@@ -166,28 +137,15 @@ def select_ast(emit_cls: type, anchor: str) -> Any:
     raise KeyError(f"no state var {anchor!r} on {emit_cls.__name__}")
 
 
-def _wrap_as_transition(next_fn: Callable, var_name: str) -> Callable:
-    """Convert a return-style next-clause into a set_var-style transition,
-    matching the runtime's next-clause-to-commit semantics."""
-    def transition() -> None:
-        value = next_fn()
-        set_var(var_name, value)
-    transition.__name__ = f"{var_name}_next_transition"
-    return transition
-
-
 # --------------------------------------------------------------------------
 # Spec extraction for SMT
 # --------------------------------------------------------------------------
 
-_SMT_SUPPORTED_TYPES: frozenset[type] = frozenset({int, bool})
-
-
 def _state_var_specs(emit_cls: type) -> dict[str, type]:
     """Build the SMT state-var specs from the program's spec.
 
-    Includes only state vars whose declared type is in
-    ``_SMT_SUPPORTED_TYPES`` (int/bool). State vars of other types
+    Includes only state vars whose declared type the SMT layer can lift
+    (``SMT_SUPPORTED_TYPES`` — int/bool). State vars of other types
     aren't dropped silently — they're absent from the specs, so any
     `set_var` on them under SmtCollectHandler raises a clear
     ``ValueError`` naming the undeclared variable.
@@ -196,7 +154,7 @@ def _state_var_specs(emit_cls: type) -> dict[str, type]:
     return {
         sv.name: sv.type_
         for sv in spec.state_vars
-        if sv.type_ in _SMT_SUPPORTED_TYPES
+        if sv.type_ in SMT_SUPPORTED_TYPES
     }
 
 
@@ -225,19 +183,6 @@ def _check_footprint_exclude(
     )
     if violating:
         return Residual(goal=goal, witness=violating)
-    return None
-
-
-def _check_footprint_include(
-    emit_cls: type, goal: FootprintIncludeGoal,
-) -> Residual | None:
-    target = select_ast(emit_cls, goal.anchor)
-    atoms = read_set(target)
-    missing = sorted(
-        p for p in goal.include if not any(_atom_matches(a, p) for a in atoms)
-    )
-    if missing:
-        return Residual(goal=goal, witness=missing)
     return None
 
 
@@ -290,22 +235,13 @@ def _check_trajectory_invariant(
     spec = emit_cls._autumn_spec
     var_lookups = {sv.name: make_lookup(sv.name) for sv in spec.state_vars}
 
-    sig = inspect.signature(goal.predicate)
-    params = list(sig.parameters.keys())
+    params = list(inspect.signature(goal.predicate).parameters.keys())
     if not params or params[-1] != "t":
         raise TypeError(
             f"trajectory_invariant lambda must take a final ``t`` "
             f"parameter; got params {params!r}"
         )
-    sv_params = params[:-1]
-    bound: list[Any] = []
-    for name in sv_params:
-        if name not in var_lookups:
-            raise NameError(
-                f"trajectory_invariant lambda parameter {name!r} is not "
-                f"a known state-var name. Available: {sorted(var_lookups)}"
-            )
-        bound.append(var_lookups[name])
+    bound = _bind_sv_params(goal.predicate, var_lookups, 1)
 
     # Walk t over [0, steps - 1] — the (snapshot[t], snapshot[t+1]) pairs.
     for t in range(goal.steps):
@@ -352,10 +288,9 @@ def _check_modular(
     funcs: dict[str, z3.FuncDeclRef] = {}
     for anchor in goal.unroll:
         target = select_ast(emit_cls, anchor)
-        for k in range(goal.horizon):
-            _, sub_cs, sub_funcs = collect_smt(target, specs, tick_value=k)
-            constraints.extend(sub_cs)
-            funcs.update(sub_funcs)
+        sub_cs, sub_funcs = unroll_transitions(target, specs, range(goal.horizon))
+        constraints.extend(sub_cs)
+        funcs.update(sub_funcs)
 
     constraints.extend(_call_with_funcs(goal.init_constraints, funcs))
     bounded_goal = z3.And(*[
@@ -369,41 +304,28 @@ def _check_modular(
     return Residual(goal=goal, witness=cex)
 
 
-def _call_with_funcs(fn: Callable, funcs: dict, *trailing_args) -> Any:
-    """Call ``fn`` with state-var Z3 functions bound by parameter name.
-
-    Two supported lambda shapes:
-
-    * **New form (preferred)** — parameters named after state vars:
-      ``lambda x, y, t: x(t+1) >= y(t)``. The gate inspects the
-      parameter names, looks up the matching Z3 function in ``funcs``,
-      and binds them. The last param (or all of them, for
-      ``init_constraints`` that takes no tick) gets ``*trailing_args``.
-
-    * **Legacy form** — first parameter is named ``funcs`` (literal):
-      ``lambda funcs, k: funcs["x"](k+1) >= funcs["y"](k)``. The gate
-      passes ``funcs`` as the first arg and ``*trailing_args`` after.
+def _bind_sv_params(fn: Callable, table: dict, n_trailing: int) -> list:
+    """Bind ``fn``'s leading parameters (all but the final ``n_trailing``) to
+    entries of ``table`` by name, returning the bound values in order. Raises
+    NameError if a leading parameter isn't a key of ``table``. Shared by the
+    invariant (Z3 funcs) and trajectory (per-tick lookups) lambda binders.
     """
-    sig = inspect.signature(fn)
-    params = list(sig.parameters.keys())
-
-    # Legacy form: first param literally named "funcs" → pass dict directly.
-    if params and params[0] == "funcs":
-        return fn(funcs, *trailing_args)
-
-    # New form: leading params named after state vars; trailing positional
-    # args (e.g., the tick index) go after.
-    n_trailing = len(trailing_args)
-    sv_param_count = len(params) - n_trailing
-    sv_params = params[:sv_param_count]
-    bound = []
+    params = list(inspect.signature(fn).parameters.keys())
+    sv_params = params[:len(params) - n_trailing]
     for name in sv_params:
-        if name not in funcs:
+        if name not in table:
             raise NameError(
-                f"invariant/init_constraints lambda parameter {name!r} "
-                f"is not a known state-var name. Available: {sorted(funcs)}"
+                f"lambda parameter {name!r} is not a known state-var name. "
+                f"Available: {sorted(table)}"
             )
-        bound.append(funcs[name])
+    return [table[name] for name in sv_params]
+
+
+def _call_with_funcs(fn: Callable, funcs: dict, *trailing_args) -> Any:
+    """Call ``fn`` with state-var Z3 functions bound by parameter name
+    (``lambda x, y, t: x(t+1) >= y(t)``); trailing positional args (the tick)
+    follow the bound functions."""
+    bound = _bind_sv_params(fn, funcs, len(trailing_args))
     return fn(*bound, *trailing_args)
 
 
@@ -413,7 +335,6 @@ def _call_with_funcs(fn: Callable, funcs: dict, *trailing_args) -> Any:
 
 _CHECKERS: dict[type, Callable[[type, Any], Residual | None]] = {
     FootprintExcludeGoal:    _check_footprint_exclude,
-    FootprintIncludeGoal:    _check_footprint_include,
     ModularArithmeticGoal:   _check_modular,
     WriteFrameGoal:          _check_write_frame,
     TrajectoryInvariantGoal: _check_trajectory_invariant,

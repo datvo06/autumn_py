@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Mapping
-
 from effectful.ops.types import Interpretation
 
 from ..ops import get_click_pos, is_event_active

@@ -1,7 +1,10 @@
+from collections.abc import Sequence
 from typing import Any
 
 from effectful.ops.syntax import defop
 from effectful.ops.types import NotHandled
+
+from .values import ObjectInstance, Position
 
 
 @defop
@@ -20,7 +23,7 @@ def get_prev_var(name: str) -> Any:
 
 
 @defop
-def sample_uniform(xs: tuple) -> Any:
+def sample_uniform[T](xs: Sequence[T]) -> T:
     raise NotHandled
 
 
@@ -45,7 +48,7 @@ def emit_render_cell(cell: Any) -> None:
 
 
 @defop
-def all_objs() -> list:
+def all_objs() -> list[ObjectInstance]:
     """Return all alive ObjectInstances across every state var."""
     raise NotHandled
 
@@ -64,40 +67,32 @@ def state_has(name: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Structural list combinators as effects.
-#
-# Higher-level Autumn primitives (addObj, removeObj, updateObj) are written
-# as plain Python on top of these — handlers (TypeOfHandler today, future
-# symbolic / reduction handlers) only need to interpret the combinators.
-#
-# The defaults are standard list semantics; type-domain interpretations
-# preserve the list type, which is sound for Autumn's structural uses
-# (where the function's domain and codomain coincide).
+# Structural list combinators as effects. addObj / removeObj / updateObj are
+# plain Python over these, so handlers only interpret the combinators.
 # --------------------------------------------------------------------------
 
 @defop
-def map_op(xs, fn):
+def map_op[T](xs: list[T], fn) -> list[T]:
     """Map fn over xs. Default: standard Python map."""
     return [fn(x) for x in xs]
 
 
 @defop
-def filter_op(xs, pred):
+def filter_op[T](xs: list[T], pred) -> list[T]:
     """Keep items of xs where pred(x) is truthy."""
     return [x for x in xs if pred(x)]
 
 
 @defop
-def concat_op(xs, ys):
+def concat_op[T](xs: list[T], ys: list[T]) -> list[T]:
     """xs ++ ys."""
     return [*xs, *ys]
 
 
 @defop
-def adjPositions_op(p):
+def adjPositions_op(p: Position) -> list[Position]:
     """Cardinal neighbours of position p as a list of Positions.
     A list *constructor*, not a transformer — kept as its own op."""
-    from .values import Position
     return [
         Position(p.x + 1, p.y),
         Position(p.x - 1, p.y),
@@ -108,25 +103,11 @@ def adjPositions_op(p):
 
 @defop
 def if_then_else(cond, then_branch, else_branch):
-    """Three-way conditional op.
+    """Three-way conditional op. Default: ``then_branch`` if ``cond`` else
+    ``else_branch``; under ``SmtCollectHandler`` it lowers to ``z3.If``.
 
-    Under ground execution: returns ``then_branch`` if ``cond`` else
-    ``else_branch``. **Both arguments are evaluated eagerly** before
-    the op is called — this is Python function-call semantics, *not*
-    Python's `if/else` statement semantics. The op short-circuits
-    *after* its arguments are computed, not before.
-
-    Under handlers like ``SmtCollectHandler``: lowers to
-    ``z3.If(cond, then_branch, else_branch)`` so symbolic conditionals
-    can be expressed without Python's native ``if`` (which would call
-    ``__bool__`` on a Z3 expression and fail).
-
-    The eager-evaluation contract means callers must not put
-    side-effecting expressions in only one branch — both branches'
-    arguments are computed regardless of ``cond``. The supported
-    rewrite patterns in ``autumn_py._ast_rewrite.symbolic`` enforce
-    this by only lifting `if/else` shapes whose branches are pure
-    expressions or factor side effects out of the conditional.
+    **Both branches are evaluated eagerly** (function-call, not `if/else`,
+    semantics), so callers must not put side effects in only one branch.
     """
     if cond:
         return then_branch

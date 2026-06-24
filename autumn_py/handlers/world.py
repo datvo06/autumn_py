@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from effectful.ops.syntax import ObjectInterpretation, implements
 
 from ..ops import all_objs, grid_size, state_has
-from ..values import ObjectInstance
+from ..values import ObjectInstance, iter_alive_instances
 
 if TYPE_CHECKING:
     from ..runtime import Runtime
@@ -27,16 +27,8 @@ class WorldHandler(ObjectInterpretation):
         out: list[ObjectInstance] = []
         state = self.runtime.state
         for sv in self.runtime.spec.state_vars:
-            if not state.has(sv.name):
-                continue
-            val = state.get(sv.name)
-            if isinstance(val, ObjectInstance):
-                if val.alive:
-                    out.append(val)
-            elif isinstance(val, (list, tuple)):
-                for v in val:
-                    if isinstance(v, ObjectInstance) and v.alive:
-                        out.append(v)
+            if state.has(sv.name):
+                out.extend(iter_alive_instances(state.get(sv.name)))
         return out
 
     @implements(grid_size)

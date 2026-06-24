@@ -46,11 +46,6 @@ def test_spec_rejects_non_string_non_statevar_modifies_entries():
         Spec(modifies=(123,))  # type: ignore[arg-type]
 
 
-def test_spec_rejects_invalid_monotone_value():
-    with pytest.raises(ValueError, match="must be one of"):
-        Spec(monotone="grumpy")
-
-
 def test_spec_rejects_zero_horizon():
     with pytest.raises(ValueError, match="horizon must be >= 1"):
         Spec(horizon=0)
@@ -86,6 +81,26 @@ def test_spec_merge_right_biased_on_conflict():
     assert merged.modifies == ("bar",)
 
 
+def test_spec_merge_preserves_explicitly_set_default_horizon():
+    """Regression: explicitly setting horizon/trajectory_steps to their
+    eventual default value must not be indistinguishable from 'unset'.
+    With None sentinels, an explicit override survives merge regardless
+    of its value; an unset (None) override leaves the base intact."""
+    base = Spec(horizon=3, invariant=lambda x, k: x(k) == k)
+    override = Spec(horizon=6, invariant=lambda x, k: x(k) == k)
+    assert base.merge(override).horizon == 6        # explicit 6 wins, not dropped
+    assert base.merge(Spec(invariant=lambda x, k: x(k) == k)).horizon == 3  # None → keep base
+
+    tbase = Spec(trajectory_invariant=lambda x, t: True, trajectory_steps=4)
+    tover = Spec(trajectory_invariant=lambda x, t: True, trajectory_steps=10)
+    assert tbase.merge(tover).trajectory_steps == 10
+    assert tbase.merge(Spec(trajectory_invariant=lambda x, t: True)).trajectory_steps == 4
+
+    # Falsy-but-explicit values must also survive merge — this is what locks
+    # 'is not None' rather than a truthy 'or' (() is falsy but is a real value).
+    assert Spec(modifies=("a", "b")).merge(Spec(modifies=())).modifies == ()
+
+
 # -------------------------------------------------------------------------
 # realize_spec_goals: Spec → Goal subclass instances
 # -------------------------------------------------------------------------
@@ -108,7 +123,7 @@ def test_realize_spec_goals_modifies_mints_write_frame():
 
 
 def test_realize_spec_goals_invariant_mints_modular_arithmetic():
-    s = Spec(invariant=lambda funcs, k: funcs["x"](k) == k, horizon=4)
+    s = Spec(invariant=lambda x, k: x(k) == k, horizon=4)
     goals = realize_spec_goals(s, anchor="x.next")
     assert len(goals) == 1
     assert isinstance(goals[0], ModularArithmeticGoal)
@@ -119,7 +134,7 @@ def test_realize_spec_goals_combines_multiple_fields():
     s = Spec(no_stochastic=True, modifies=("y",))
     goals = realize_spec_goals(s, anchor="y.next")
     assert len(goals) == 2
-    assert {type(g).__name__ for g in goals} == {"FootprintExcludeGoal", "WriteFrameGoal"}
+    assert {type(g) for g in goals} == {FootprintExcludeGoal, WriteFrameGoal}
 
 
 # -------------------------------------------------------------------------
@@ -322,19 +337,16 @@ def test_spec_with_invariant_runs_through_z3():
 
         @x.next
         @spec(
-            invariant=lambda funcs, k: funcs["x"](k + 1) == funcs["x"](k - 1) + 1,
+            invariant=lambda x, k: x(k + 1) == x(k - 1) + 1,
             unroll=("x.next",),
-            init_constraints=lambda funcs: [
-                funcs["x"](0) == 0,
-                funcs["x"](-1) == 0,
-            ],
+            init_constraints=lambda x: [x(0) == 0, x(-1) == 0],
             horizon=3,
         )
         def _() -> int:
             return prev(P.x) + 1
 
     residuals = gate(P)
-    assert isinstance(residuals, list)
+    assert residuals == []
 
 
 # -------------------------------------------------------------------------
@@ -369,12 +381,9 @@ def test_spec_unroll_accepts_statevar_refs():
 
         @x.next
         @spec(
-            invariant=lambda funcs, k: funcs["x"](k + 1) == funcs["x"](k - 1) + 1,
+            invariant=lambda x, k: x(k + 1) == x(k - 1) + 1,
             unroll=(x,),         # ← bare StateVar; resolves to "x.next"
-            init_constraints=lambda funcs: [
-                funcs["x"](0) == 0,
-                funcs["x"](-1) == 0,
-            ],
+            init_constraints=lambda x: [x(0) == 0, x(-1) == 0],
             horizon=3,
         )
         def _() -> int:
@@ -405,7 +414,7 @@ def test_spec_invariant_lambda_binds_state_vars_by_param_name():
             return prev(P.x) + 1
 
     residuals = gate(P)
-    assert isinstance(residuals, list)
+    assert residuals == []
 
 
 def test_spec_invariant_with_multiple_state_vars_param_introspection():
@@ -434,7 +443,30 @@ def test_spec_invariant_with_multiple_state_vars_param_introspection():
             return prev(P.y)
 
     residuals = gate(P)
-    assert isinstance(residuals, list)
+    assert residuals == []
+
+
+def test_spec_invariant_violation_returns_modular_residual():
+    """A next-clause that violates its @spec(invariant=...) yields a
+    ModularArithmeticGoal residual (Z3 finds a counterexample over the
+    bounded horizon) — the negative counterpart to the passing cases above."""
+    @program(grid_size=8)
+    class P:
+        x = StateVar(int, init=0)
+
+        @x.next
+        @spec(
+            invariant=lambda x, k: x(k + 1) == x(k - 1) + 2,  # claims +2 ...
+            unroll=("x.next",),
+            init_constraints=lambda x: [x(0) == 0, x(-1) == 0],
+            horizon=3,
+        )
+        def _() -> int:
+            return prev(P.x) + 1  # ... but the clause increments by 1
+
+    residuals = gate(P)
+    assert len(residuals) == 1
+    assert isinstance(residuals[0].goal, ModularArithmeticGoal)
 
 
 def test_space_invaders_r2_fixed_passes_gate_with_attached_specs():
@@ -587,6 +619,31 @@ def test_trajectory_invariant_supports_prev_lookup_via_negative_offset():
             trajectory_invariant=lambda x, t:
                 True if t == 0 else (x(t) - x(t - 1) == 1),
             trajectory_steps=5,
+        )
+        def _() -> int:
+            return prev(P.x) + 1
+
+    residuals = gate(P)
+    assert residuals == []
+
+
+def test_trajectory_invariant_clamps_negative_index_to_boundary():
+    """Out-of-range tick reads clamp to the boundary snapshot, so ``x(-1)``
+    resolves to ``snapshot[0]`` at every tick — the predicate below depends
+    on that clamp (unlike the test above, which short-circuits t=0). A clamp
+    regression (raising, or Python's negative-index wraparound to the last
+    snapshot) would flip this to a residual."""
+    @program(grid_size=8)
+    class P:
+        x = StateVar(int, init=7)
+
+        @x.next
+        @spec(
+            # x(-1) must clamp to snapshot[0] (== x(0)) for every t, even
+            # though x keeps incrementing (so naive x[-1] would read the last
+            # snapshot and differ).
+            trajectory_invariant=lambda x, t: x(-1) == x(0),
+            trajectory_steps=4,
         )
         def _() -> int:
             return prev(P.x) + 1

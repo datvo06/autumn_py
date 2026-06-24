@@ -56,7 +56,7 @@ def test_prev_handler_reads_snapshot():
 
 def test_prev_snapshot_is_isolated_from_live_state():
     st = StateHandler()
-    st.seed("a", 1)
+    st.write("a", 1)
     snap = st.freeze_snapshot()
     with handler(st):
         set_var("a", 99)
@@ -66,7 +66,7 @@ def test_prev_snapshot_is_isolated_from_live_state():
 
 def test_write_buffer_captures_and_flushes():
     st = StateHandler()
-    st.seed("a", 0)
+    st.write("a", 0)
     buf = WriteBufferHandler()
     with handler(st):
         with handler(buf):

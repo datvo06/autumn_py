@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import contextlib
-from typing import Any
 
 from effectful.ops.semantics import handler
 
-from .api import ProgramSpec, TypeMismatch, _check_type
+from .api import ProgramSpec, TypeMismatch, _check_type, transition_of
 from .events import EVENT_NAMES
 from .handlers import (
     NativeRandomHandler,
@@ -18,7 +17,7 @@ from .handlers import (
     make_event_intp,
 )
 from .ops import emit_render_cell
-from .values import ObjectInstance, cell_to_dict
+from .values import cell_to_dict, iter_alive_instances
 
 
 class Runtime:
@@ -77,7 +76,7 @@ class Runtime:
             assert sv.name is not None
             value = sv.initial_value()
             _check_type(value, sv.type_, context=f"initial value of state var {sv.name!r}")
-            self.state.seed(sv.name, value)
+            self.state.write(sv.name, value)
 
     def close(self) -> None:
         self._stack.close()
@@ -125,10 +124,7 @@ class Runtime:
                     for clause in self.spec.on_clauses:
                         pred = clause.predicate
                         result = pred() if callable(pred) else pred
-                        # §2.3: on-clause predicates must be Bool. Coerce
-                        # bool subclasses (the event-sentinel __bool__'s
-                        # result is bool by definition; lambdas may return
-                        # non-bool truthy/falsy — reject those).
+                        # on-clause predicates must be bool, not just truthy.
                         if not isinstance(result, bool):
                             raise TypeMismatch(
                                 f"on-clause predicate {clause.name!r} returned "
@@ -139,21 +135,22 @@ class Runtime:
                             clause.body()
                 write_buf.flush(self.state)
 
-            # Next-phase: iterate state vars in declaration order. Skip a
-            # var whose name was written by an on-clause this tick
-            # (on_writes_this_tick). Otherwise evaluate its next-expression
-            # and commit. A next-expression MAY call set_var on sibling
-            # vars; those writes pass through StateHandler._set to
-            # _globals directly, do not populate on_writes_this_tick, and
-            # become visible to later next-exprs via get_var.
+            # Next-phase: in declaration order, skip vars an on-clause wrote
+            # this tick (on_writes_this_tick), else run the next-expr and
+            # commit. Sibling set_var writes pass through _set untracked.
             for sv in self.spec.state_vars:
                 if sv._next_fn is None:
                     continue
                 if sv.name in self.state.on_writes_this_tick:
                     continue
-                value = sv._next_fn()
-                _check_type(value, sv.type_, context=f"next-expression of state var {sv.name!r}")
-                self.state.commit_next(sv.name, value)
+                # Shared transition term; type-check runs pre-commit (validate).
+                transition_of(
+                    sv,
+                    validate=lambda v: _check_type(
+                        v, sv.type_,
+                        context=f"next-expression of state var {sv.name!r}",
+                    ),
+                )()
 
     def _drain_events(self) -> tuple[frozenset[str], tuple[int, int] | None]:
         active: set[str] = set()
@@ -182,18 +179,7 @@ class Runtime:
         for sv in self.spec.state_vars:
             if not self.state.has(sv.name):
                 continue
-            for inst in _iter_instances(self.state.get(sv.name)):
-                if not inst.alive:
-                    continue
+            for inst in iter_alive_instances(self.state.get(sv.name)):
                 for cell in inst.rendered_cells():
                     emit_render_cell(cell)
         return [cell_to_dict(c) for c in self.render.cells]
-
-
-def _iter_instances(value: Any):
-    if isinstance(value, ObjectInstance):
-        yield value
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            if isinstance(v, ObjectInstance):
-                yield v

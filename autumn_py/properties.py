@@ -1,39 +1,24 @@
 """Property annotations for `@program`-decorated classes.
 
-Borrows Dafny's pattern of attaching specifications inline with code:
-each next-clause carries its spec via a single ``@spec(...)`` decorator
-(or smaller standalone decorators like ``@modifies(...)`` /
-``@no_stochastic`` for compound-spec ergonomics).
+A next-clause carries its spec via a decorator that records metadata on the
+function (``__autumn_spec__``); ``@program`` realizes that into ``Goal``
+instances on ``cls._autumn_spec.properties``, which ``gate()`` checks.
 
-The decorator records spec metadata onto the function (``__autumn_spec__``).
-StateVar.next / @on(...) recognise the metadata and mint corresponding
-Goal subclass instances against their anchor, registering them on a
-module-level ``_pending_properties`` list. ``@program`` drains this
-list into ``cls._autumn_spec.properties``; ``gate(emit_cls)`` reads
-from there when no explicit goals are passed.
-
-Annotations supported in this module:
-
-* ``@spec(...)`` — bundle: ``no_stochastic`` / ``modifies`` /
-  ``invariant`` / ``unroll`` / ``init_constraints`` / ``horizon``.
+* ``@spec(...)`` — bundle: ``no_stochastic`` / ``modifies`` / ``invariant`` /
+  ``unroll`` / ``init_constraints`` / ``horizon`` / ``trajectory_invariant``.
 * ``@no_stochastic`` — sugar for ``@spec(no_stochastic=True)``.
 * ``@modifies(*allowed_writes)`` — sugar for ``@spec(modifies=...)``.
 
-Compose by stacking — ``@spec(...)`` and ``@modifies(...)`` on the same
-function merge their fields. Last decorator wins on conflicts.
+Stacking decorators merges their fields (last wins on conflicts).
 """
 from __future__ import annotations
 
-import dataclasses
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 # Module-level pending list; @program drains into _autumn_spec.properties.
-# Same pattern as _pending_on_clauses / _pending_next_clauses in api.py.
+# Same pattern as _pending_on_clauses in api.py.
 _pending_properties: list = []
-
-
-_VALID_MONOTONE = {"nondecreasing", "nonincreasing", "strict_increasing", "strict_decreasing"}
 
 
 @dataclass(frozen=True)
@@ -53,26 +38,25 @@ class Spec:
         Mints a ``WriteFrameGoal``. Entries may be strings or StateVar
         references — StateVar refs are resolved to ``.name`` at
         goal-mint time (after class-body's ``__set_name__`` binds names).
-    invariant : Callable[[FuncMap, int], z3.BoolRef] | None
-        SMT-checkable invariant: ``(funcs, k) -> Z3 BoolRef`` producing
-        the per-tick goal predicate at tick k. Conjoined across the
-        bounded horizon. Mints a ``ModularArithmeticGoal``. ``funcs``
-        is a dict-like keyed on either string state-var names *or*
-        StateVar references — both ``funcs["x"]`` and ``funcs[x]``
-        resolve to the same Z3 function.
+    invariant : Callable[..., z3.BoolRef] | None
+        SMT-checkable invariant. A lambda whose leading parameters are
+        named after state vars and whose final parameter is the tick
+        ``k``: ``lambda x, y, k: x(k + 1) >= y(k)``. The gate binds each
+        state-var parameter to its Z3 function and passes the tick last.
+        Conjoined across the bounded horizon; mints a
+        ``ModularArithmeticGoal``.
     unroll : tuple[str | StateVar, ...] | None
         Anchors whose transitions are unrolled by the SMT goal. Strings
         like ``"x.next"`` or bare StateVar references (which resolve to
         ``"<name>.next"``). Defaults to ``(self_anchor,)``. Used only
         with ``invariant``.
-    init_constraints : Callable[[FuncMap], list[z3.BoolRef]] | None
+    init_constraints : Callable[..., list[z3.BoolRef]] | None
         Z3 init constraints (state-var inits, prev-anchors, counters).
-        Used only with ``invariant``.
-    horizon : int
-        Bounded model checking horizon for ``invariant``. Default 6.
-    monotone : str | None
-        One of ``_VALID_MONOTONE``. (Future work — currently validated
-        but does not mint a goal.)
+        Same state-var-by-parameter-name binding as ``invariant``, but
+        with no trailing tick argument. Used only with ``invariant``.
+    horizon : int | None
+        Bounded model checking horizon for ``invariant``. ``None`` (the
+        default) resolves to 6 at goal-mint time.
     trajectory_invariant : Callable[..., bool] | None
         Concrete-walk invariant: a lambda whose parameters are state-
         var names plus a final ``t`` (tick index). Same indexed-function
@@ -82,18 +66,18 @@ class Spec:
         ``_check_trajectory_invariant``, which runs the program for
         ``trajectory_steps`` ticks and verifies the predicate at every
         ``(snapshot[t], snapshot[t+1])`` pair.
-    trajectory_steps : int
-        Number of trajectory ticks to record before checking. Default 10.
+    trajectory_steps : int | None
+        Number of trajectory ticks to record before checking. ``None``
+        (the default) resolves to 10 at goal-mint time.
     """
     no_stochastic: bool = False
     modifies: tuple | None = None
-    invariant: Callable[[Any, int], Any] | None = None
+    invariant: Callable[..., Any] | None = None
     unroll: tuple | None = None
-    init_constraints: Callable[[Any], list] | None = None
-    horizon: int = 6
-    monotone: str | None = None
+    init_constraints: Callable[..., list] | None = None
+    horizon: int | None = None
     trajectory_invariant: Callable[..., bool] | None = None
-    trajectory_steps: int = 10
+    trajectory_steps: int | None = None
 
     def __post_init__(self) -> None:
         # Imported lazily to avoid circular import: properties → api → properties
@@ -122,19 +106,14 @@ class Spec:
                         f"Spec.unroll entries must be str or StateVar; "
                         f"got {type(u).__name__}: {u!r}"
                     )
-        if self.monotone is not None and self.monotone not in _VALID_MONOTONE:
-            raise ValueError(
-                f"Spec.monotone must be one of {sorted(_VALID_MONOTONE)}; "
-                f"got {self.monotone!r}"
-            )
-        if self.horizon < 1:
+        if self.horizon is not None and self.horizon < 1:
             raise ValueError(f"Spec.horizon must be >= 1; got {self.horizon}")
         if self.unroll is not None and self.invariant is None:
             raise ValueError(
                 "Spec.unroll is only meaningful with an invariant; "
                 "received unroll without invariant"
             )
-        if self.trajectory_steps < 1:
+        if self.trajectory_steps is not None and self.trajectory_steps < 1:
             raise ValueError(
                 f"Spec.trajectory_steps must be >= 1; got {self.trajectory_steps}"
             )
@@ -151,14 +130,13 @@ class Spec:
                 other.init_constraints if other.init_constraints is not None
                 else self.init_constraints
             ),
-            horizon=other.horizon if other.horizon != 6 else self.horizon,
-            monotone=other.monotone if other.monotone is not None else self.monotone,
+            horizon=other.horizon if other.horizon is not None else self.horizon,
             trajectory_invariant=(
                 other.trajectory_invariant if other.trajectory_invariant is not None
                 else self.trajectory_invariant
             ),
             trajectory_steps=(
-                other.trajectory_steps if other.trajectory_steps != 10
+                other.trajectory_steps if other.trajectory_steps is not None
                 else self.trajectory_steps
             ),
         )
@@ -265,13 +243,12 @@ def realize_spec_goals(spec_obj: Spec, anchor: str) -> list:
             unroll=resolved_unroll,
             init_constraints=spec_obj.init_constraints or (lambda *args: []),
             goal_factory=spec_obj.invariant,
-            horizon=spec_obj.horizon,
+            horizon=spec_obj.horizon if spec_obj.horizon is not None else 6,
         ))
     if spec_obj.trajectory_invariant is not None:
         goals.append(TrajectoryInvariantGoal(
             anchor=anchor,
             predicate=spec_obj.trajectory_invariant,
-            steps=spec_obj.trajectory_steps,
+            steps=spec_obj.trajectory_steps if spec_obj.trajectory_steps is not None else 10,
         ))
-    # spec_obj.monotone is validated but doesn't mint a goal yet — future work.
     return goals

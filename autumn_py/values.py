@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +30,7 @@ class Cell:
 
     def resolve_color(self, inst: "ObjectInstance") -> str:
         c = self.color(inst) if callable(self.color) else self.color
-        # §2.3: cell color expressions are typed Str. Enforce at render time.
+        # cell color must resolve to str; enforced at render time.
         if not isinstance(c, str):
             from .api import TypeMismatch  # local import: api ↔ values cycle
             raise TypeMismatch(
@@ -95,3 +95,16 @@ def cell_to_dict(c: Cell) -> dict:
     """Serialization helper. Cell itself no longer carries to_dict since
     ``color`` may be callable until rendered through an ObjectInstance."""
     return {"x": c.x, "y": c.y, "color": c.color}
+
+
+def iter_alive_instances(value: Any) -> Iterator[ObjectInstance]:
+    """Yield each alive ObjectInstance in ``value`` — a scalar instance or a
+    list/tuple of them. Any other value (or a dead instance) yields nothing.
+    Single source of truth for the render walk and the all_objs query."""
+    if isinstance(value, ObjectInstance):
+        if value.alive:
+            yield value
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            if isinstance(v, ObjectInstance) and v.alive:
+                yield v

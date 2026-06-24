@@ -46,17 +46,14 @@ def _phi_2_goal(emit_cls):
     """
     init_value = select_ast(emit_cls, "next_spawn_step.init")
 
-    def init_constraints(funcs):
-        step_count = funcs["step_count"]
-        next_spawn_step = funcs["next_spawn_step"]
+    def init_constraints(step_count, next_spawn_step):
         return [
             *(step_count(k) == k for k in range(8)),
             next_spawn_step(0) == init_value,
             next_spawn_step(-1) == init_value,
         ]
 
-    def goal_factory(funcs, k):
-        spawn_event = funcs["spawn_event"]
+    def goal_factory(spawn_event, k):
         return spawn_event(k + 1) == ((k % 15) == 3)
 
     return ModularArithmeticGoal(
@@ -75,6 +72,36 @@ def _phi_2_goal(emit_cls):
 def test_select_ast_resolves_next_clause_callable():
     target = select_ast(SpaceInvadersR1, "spawn_event.next")
     assert callable(target)
+
+
+def test_select_ast_next_commits_through_the_set_var_op():
+    """E-1: select_ast('x.next') returns api.transition_of — the same term
+    the runtime runs — and it commits *through the set_var op*, not by a
+    direct _globals write. Witness the op channel with a WriteBufferHandler
+    that intercepts set_var: the transition must emit exactly ('x', 6)
+    through it. (A plain `st.get('x') == 6` couldn't tell the op path from a
+    direct write, since _set and write are byte-identical.)"""
+    from effectful.ops.semantics import handler
+
+    from autumn_py import StateVar, prev, program
+    from autumn_py.handlers import PrevStateHandler, StateHandler, WriteBufferHandler
+
+    @program(grid_size=8)
+    class Counter:
+        x = StateVar(int, init=0)
+
+        @x.next
+        def _() -> int:
+            return prev(Counter.x) + 1
+
+    transition = select_ast(Counter, "x.next")
+    st = StateHandler()
+    st.write("x", 5)
+    buf = WriteBufferHandler()  # innermost: intercepts the set_var op
+    with handler(st), handler(PrevStateHandler({"x": 5})), handler(buf):
+        transition()
+    assert buf.pending == [("x", 6)]  # committed via the set_var op, not a direct write
+    assert st.get("x") == 5  # the op was captured by the buffer, never reached _globals
 
 
 def test_select_ast_resolves_init_value():
@@ -183,3 +210,30 @@ def test_round_kernel_trajectory_round_1_to_round_2_fixed():
         [phi_1_no_stochastic, _phi_2_goal(SpaceInvadersR2Fixed)],
     )
     assert r2f == []
+
+
+def test_gate_raises_on_native_if_over_symbolic_footprint_clause():
+    """A @no_stochastic goal runs read_set on the clause. If the clause
+    branches natively on a symbolic value, read_set raises rather than
+    returning a partial footprint that would hide the sample_uniform in the
+    unreached branch — so gate() raises loudly instead of false-passing the
+    goal. Pins the raise-not-swallow contract at the gate boundary."""
+    import pytest
+
+    from autumn_py import StateVar, no_stochastic, prev, program
+    from autumn_py.ops import sample_uniform, set_var
+
+    @program(grid_size=8)
+    class P:
+        flag = StateVar(bool, init=False)
+        hidden = StateVar(int, init=0)
+
+        @flag.next
+        @no_stochastic
+        def _() -> bool:
+            if prev(P.flag):  # native if on a symbolic value → read_set raises
+                set_var("hidden", sample_uniform((1, 2, 3)))  # hidden if swallowed
+            return prev(P.flag)
+
+    with pytest.raises(z3.Z3Exception):
+        gate(P)

@@ -96,20 +96,24 @@ def test_statevar_arithmetic_delegates_to_get_var_op():
 
 
 def test_statevar_boolean_coercion_delegates_to_get_var_op():
-    """`if SV: ...` calls .get(), then bools the result. Under read_set,
-    the atom is still recorded."""
+    """`bool(SV)` calls .get() (→ get_var op) before bool-casting the
+    result. Observed directly on the handler: the get_var atom is recorded
+    even though bool() then raises on the symbolic value (read_set itself
+    does not swallow that — see test_read_set_raises_on_native_if_over_symbolic)."""
+    import pytest
+    import z3
+    from effectful.ops.semantics import handler
+
     from autumn_py import StateVar
-    from autumn_py.smt import read_set
+    from autumn_py.smt import SmtCollectHandler
 
     sv = StateVar(bool, init=False, name="spawn_event")
 
-    def uses_boolean():
-        if sv:
-            return "fired"
-        return "not fired"
-
-    atoms = read_set(uses_boolean)
-    assert ("get_var", "spawn_event", 0) in atoms
+    h = SmtCollectHandler({}, auto_declare=True)
+    with handler(h):
+        with pytest.raises(z3.Z3Exception):
+            bool(sv)  # __bool__ → .get() → get_var (atom recorded), then bool(z3) raises
+    assert ("get_var", "spawn_event", 0) in h.atoms
 
 
 def test_statevar_comparison_delegates_to_get_var_op():

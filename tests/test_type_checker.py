@@ -144,6 +144,9 @@ def test_state_var_next_expression_return_type_is_checked():
     r = Runtime(P)
     with pytest.raises(TypeMismatch):
         r.step()
+    # The check runs before the commit, so the failed next-expression must
+    # not have mutated state — x still holds its prior value.
+    assert r.state.get("x") == 0
 
 
 def test_state_var_with_object_type_accepts_anything():
