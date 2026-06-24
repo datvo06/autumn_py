@@ -1,7 +1,10 @@
+from collections.abc import Sequence
 from typing import Any
 
 from effectful.ops.syntax import defop
 from effectful.ops.types import NotHandled
+
+from .values import ObjectInstance, Position
 
 
 @defop
@@ -20,7 +23,7 @@ def get_prev_var(name: str) -> Any:
 
 
 @defop
-def sample_uniform(xs: tuple) -> Any:
+def sample_uniform[T](xs: Sequence[T]) -> T:
     raise NotHandled
 
 
@@ -45,7 +48,7 @@ def emit_render_cell(cell: Any) -> None:
 
 
 @defop
-def all_objs() -> list:
+def all_objs() -> list[ObjectInstance]:
     """Return all alive ObjectInstances across every state var."""
     raise NotHandled
 
@@ -69,28 +72,27 @@ def state_has(name: str) -> bool:
 # --------------------------------------------------------------------------
 
 @defop
-def map_op(xs, fn):
+def map_op[T](xs: list[T], fn) -> list[T]:
     """Map fn over xs. Default: standard Python map."""
     return [fn(x) for x in xs]
 
 
 @defop
-def filter_op(xs, pred):
+def filter_op[T](xs: list[T], pred) -> list[T]:
     """Keep items of xs where pred(x) is truthy."""
     return [x for x in xs if pred(x)]
 
 
 @defop
-def concat_op(xs, ys):
+def concat_op[T](xs: list[T], ys: list[T]) -> list[T]:
     """xs ++ ys."""
     return [*xs, *ys]
 
 
 @defop
-def adjPositions_op(p):
+def adjPositions_op(p: Position) -> list[Position]:
     """Cardinal neighbours of position p as a list of Positions.
     A list *constructor*, not a transformer — kept as its own op."""
-    from .values import Position
     return [
         Position(p.x + 1, p.y),
         Position(p.x - 1, p.y),
