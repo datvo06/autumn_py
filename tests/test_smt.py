@@ -434,25 +434,23 @@ def test_symbolic_preserves_ground_execution_semantics():
 # read_set soundness — the atom-before-effect ordering invariant
 # -------------------------------------------------------------------------
 
-def test_read_set_records_atoms_before_a_mid_clause_raise():
-    """read_set's over-approximation rests on every handler method appending
-    its atom *before* anything that can raise. A clause that records a write,
-    then trips the symbolic-bool cast (native `if` on a Z3 value), must still
-    have the pre-raise write in its footprint."""
+def test_read_set_raises_on_native_if_over_symbolic():
+    """read_set never returns a partial (and therefore unsound) footprint: a
+    clause that uses native `if` on a symbolic value raises rather than
+    silently truncating at the failure point. Such clauses must use
+    @symbolic / if_then_else."""
     def clause():
-        set_var("written_before", 1)        # atom recorded first
-        if get_var("flag") == 0:            # native if on a Z3 BoolRef → raises
-            set_var("after", 2)             # unreached
+        set_var("a", 1)
+        if get_var("flag"):        # native if → bool() on a Z3 expr → raises
+            set_var("b", 2)        # would be silently missed if swallowed
 
-    atoms = read_set(clause)
-    assert ("set_var", "written_before") in atoms
-    assert ("get_var", "flag", 0) in atoms
+    with pytest.raises(z3.Z3Exception):
+        read_set(clause)
 
 
 def test_read_set_propagates_unexpected_errors():
-    """read_set tolerates only the symbolic-bool cast (and out-of-vocabulary
-    NotHandled). A genuine bug in a clause must surface, not be swallowed
-    into a silently-truncated footprint."""
+    """read_set swallows nothing — a genuine bug in a clause surfaces rather
+    than being hidden behind a truncated footprint."""
     def buggy():
         get_var("x")
         raise ValueError("boom")

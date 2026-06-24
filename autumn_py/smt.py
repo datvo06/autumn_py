@@ -35,7 +35,6 @@ from typing import Any, Callable
 import z3
 from effectful.ops.semantics import handler
 from effectful.ops.syntax import ObjectInterpretation, implements
-from effectful.ops.types import NotHandled
 
 from .ops import (
     alloc_obj_id,
@@ -255,9 +254,18 @@ def read_set(
     * ``("is_event_active", event_name)`` — event-activation read.
 
     Implementation: run ``fn`` under ``SmtCollectHandler`` and harvest its
-    ``atoms`` accumulator. Side-effecting ops still append their atoms even
-    if the resulting Z3 expression is discarded, so this function gives a
-    sound over-approximation of the lambda's syntactic dependencies.
+    ``atoms`` accumulator. Each handler method appends its atom, so the
+    accumulator reflects every op the clause ran.
+
+    The clause must be symbolically evaluable end-to-end. read_set does not
+    swallow exceptions: a clause that uses native ``if`` / ``bool()`` on a
+    symbolic value (raising ``z3.Z3Exception``) or calls an op with no
+    symbolic interpretation (raising ``NotHandled``) propagates the error
+    rather than returning a *partial* — and therefore unsound — footprint
+    (a missed ``sample_uniform`` / ``set_var`` past the failure point would
+    false-pass a ``no_stochastic`` / ``modifies`` goal). Decorate such
+    clauses with ``@symbolic`` (which lifts ``if`` into ``if_then_else``),
+    or extend ``SmtCollectHandler`` to interpret the op.
 
     `state_var_specs` defaults to an empty dict — undeclared names get
     fresh existentials, which is fine for footprint analysis since we only
@@ -265,24 +273,7 @@ def read_set(
     """
     h = SmtCollectHandler(state_var_specs or {}, auto_declare=True)
     with handler(h):
-        try:
-            fn()
-        except NotHandled:
-            # An op outside the SMT vocabulary fired (a world query like
-            # grid_size / all_objs has no symbolic interpretation). The
-            # footprint atoms gate goals care about — get_var / set_var /
-            # get_prev_var / sample_uniform — are recorded before such an op
-            # could run, because every handler method appends its atom as its
-            # first statement. Locked by
-            # ``test_read_set_records_atoms_before_a_mid_clause_raise``.
-            pass
-        except z3.Z3Exception as e:
-            # Tolerate only the symbolic-bool cast, raised when a raw clause
-            # uses native `if` / `bool()` on a Z3 expression (it should have
-            # used @symbolic / if_then_else). Any other Z3 error is a real
-            # bug and must surface rather than silently truncate the footprint.
-            if "Boolean" not in str(e):
-                raise
+        fn()
     return frozenset(h.atoms)
 
 
