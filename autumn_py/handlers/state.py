@@ -16,10 +16,12 @@ class StateHandler(ObjectInterpretation):
     next-expression this tick):
 
     * **untracked** — init seeding (``write``), plus every ``set_var`` op
-      write (the ``_set`` handler): next-expr commits and free-form sibling
-      writes from clause bodies alike. Autumn permits next-exprs to write
+      write (the ``_set`` handler): next-expr commits and the sibling-var
+      writes a next-expression may make. Autumn permits next-exprs to write
       sibling vars; as in the C++ semantics, those do not suppress the
-      default next update.
+      default next update. (On-clause writes are buffered separately —
+      ``WriteBufferHandler`` → ``apply_buffered`` — so they don't reach
+      ``_set``.)
     * **tracked** — on-clause writes flushed at end of the on-phase
       (``apply_buffered``), which add to ``on_writes_this_tick``.
     """

@@ -86,11 +86,6 @@ class Type:
         return self.base is ObjectInstance
 
 
-def is_type_token(x: Any) -> bool:
-    """Test whether x is a type token (used by stdlib for polymorphic dispatch)."""
-    return isinstance(x, Type)
-
-
 # --------------------------------------------------------------------------
 # TypeOfHandler — interprets @defops in the type domain
 # --------------------------------------------------------------------------

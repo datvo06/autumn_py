@@ -148,31 +148,16 @@ class StateVar(Generic[T]):
         materialised by ``@program`` (which has the bound state-var
         name; ``__set_name__`` doesn't run until the class body
         finishes, so we can't materialise here yet)."""
-        _check_next_return_annotation(fn, self)
+        _check_return_annotation(fn, self, f"@{self.name}.next")
         self._next_fn = fn
         return fn
 
     def initializer(self, fn: Callable[[], Any]) -> Callable[[], Any]:
         """``@<sv>.initializer def _(): ...`` — register an initializer
         that runs under the handler stack (e.g. to construct objects)."""
-        if self.type_ is not None and self.type_ is not object:
-            hints: dict = {}
-            try:
-                hints = typing.get_type_hints(fn)
-            except (TypeError, NameError):
-                hints = {}
-            ret = hints.get("return")
-            if ret is not None and ret is not object and ret is not Any \
-                    and ret is not self.type_:
-                sv_origin = typing.get_origin(self.type_)
-                ret_origin = typing.get_origin(ret)
-                if not (sv_origin is not None and sv_origin is ret_origin):
-                    raise TypeMismatch(
-                        f"initializer for state var {self.name!r}: "
-                        f"function return type {getattr(ret, '__name__', ret)!r} "
-                        f"does not match declared type "
-                        f"{getattr(self.type_, '__name__', self.type_)!r}"
-                    )
+        _check_return_annotation(
+            fn, self, f"initializer for state var {self.name!r}"
+        )
         self.init_fn = fn
         return fn
 
@@ -441,9 +426,9 @@ def program(**config):
     return decorator
 
 
-def _check_next_return_annotation(fn: Callable, sv: StateVar) -> None:
-    """If the next-clause function has a return annotation, check it's
-    compatible with the state var's declared type."""
+def _check_return_annotation(fn: Callable, sv: StateVar, context: str) -> None:
+    """If ``fn`` has a return annotation, check it's compatible with the
+    state var's declared type. ``context`` names the site for the error."""
     if sv.type_ is None or sv.type_ is object:
         return
     try:
@@ -460,7 +445,7 @@ def _check_next_return_annotation(fn: Callable, sv: StateVar) -> None:
     if sv_origin is not None and sv_origin is ret_origin:
         return
     raise TypeMismatch(
-        f"@{sv.name}.next: function return type "
+        f"{context}: function return type "
         f"{getattr(ret, '__name__', ret)!r} does not match "
         f"declared type {getattr(sv.type_, '__name__', sv.type_)!r}"
     )

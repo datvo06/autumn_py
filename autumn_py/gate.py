@@ -235,22 +235,13 @@ def _check_trajectory_invariant(
     spec = emit_cls._autumn_spec
     var_lookups = {sv.name: make_lookup(sv.name) for sv in spec.state_vars}
 
-    sig = inspect.signature(goal.predicate)
-    params = list(sig.parameters.keys())
+    params = list(inspect.signature(goal.predicate).parameters.keys())
     if not params or params[-1] != "t":
         raise TypeError(
             f"trajectory_invariant lambda must take a final ``t`` "
             f"parameter; got params {params!r}"
         )
-    sv_params = params[:-1]
-    bound: list[Any] = []
-    for name in sv_params:
-        if name not in var_lookups:
-            raise NameError(
-                f"trajectory_invariant lambda parameter {name!r} is not "
-                f"a known state-var name. Available: {sorted(var_lookups)}"
-            )
-        bound.append(var_lookups[name])
+    bound = _bind_sv_params(goal.predicate, var_lookups, 1)
 
     # Walk t over [0, steps - 1] — the (snapshot[t], snapshot[t+1]) pairs.
     for t in range(goal.steps):
@@ -313,25 +304,28 @@ def _check_modular(
     return Residual(goal=goal, witness=cex)
 
 
-def _call_with_funcs(fn: Callable, funcs: dict, *trailing_args) -> Any:
-    """Call ``fn`` with state-var Z3 functions bound by parameter name.
-
-    The lambda's leading parameters are named after state vars
-    (``lambda x, y, t: x(t+1) >= y(t)``); the gate looks each up in
-    ``funcs`` and binds it. Any trailing positional ``*trailing_args``
-    (e.g. the tick index) follow the bound functions.
+def _bind_sv_params(fn: Callable, table: dict, n_trailing: int) -> list:
+    """Bind ``fn``'s leading parameters (all but the final ``n_trailing``) to
+    entries of ``table`` by name, returning the bound values in order. Raises
+    NameError if a leading parameter isn't a key of ``table``. Shared by the
+    invariant (Z3 funcs) and trajectory (per-tick lookups) lambda binders.
     """
-    sig = inspect.signature(fn)
-    params = list(sig.parameters.keys())
-    sv_params = params[:len(params) - len(trailing_args)]
-    bound = []
+    params = list(inspect.signature(fn).parameters.keys())
+    sv_params = params[:len(params) - n_trailing]
     for name in sv_params:
-        if name not in funcs:
+        if name not in table:
             raise NameError(
-                f"invariant/init_constraints lambda parameter {name!r} "
-                f"is not a known state-var name. Available: {sorted(funcs)}"
+                f"lambda parameter {name!r} is not a known state-var name. "
+                f"Available: {sorted(table)}"
             )
-        bound.append(funcs[name])
+    return [table[name] for name in sv_params]
+
+
+def _call_with_funcs(fn: Callable, funcs: dict, *trailing_args) -> Any:
+    """Call ``fn`` with state-var Z3 functions bound by parameter name
+    (``lambda x, y, t: x(t+1) >= y(t)``); trailing positional args (the tick)
+    follow the bound functions."""
+    bound = _bind_sv_params(fn, funcs, len(trailing_args))
     return fn(*bound, *trailing_args)
 
 
