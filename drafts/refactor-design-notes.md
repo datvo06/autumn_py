@@ -78,3 +78,37 @@ Rejected:
   the exception message (`"Boolean" in str(e)`). Neither sound (a message
   change breaks it) nor complete (can't reliably tell the two apart), and it
   still left the truncation unsoundness in place.
+
+## Module rationale (kept out of the source docstrings)
+
+The per-module design context, so the source docstrings can state only what
+each module *is*:
+
+- **`smt.py`** — mirrors RoboTL's `solve_init` pattern adapted to a
+  finite-domain SMT setting: a collection handler produces (free variables,
+  constraints) and a backend solver consumes them to return a model or UNSAT.
+  Encoding: each StateVar `name` is a Z3 function `name : Int -> Sort`; a read
+  at tick `t` is `name(t)`, a write `set_var(name, v)` records `name(t+1) = v`,
+  and the per-tick transition rules are universally quantified over `t` at
+  finalization. The StateVars and the `sample_uniform` existentials *are* the
+  symbolic variables — no parallel namespace — so goals are plain Python
+  operators over Z3 expressions.
+- **`properties.py`** — borrows Dafny's inline-spec ergonomics (a spec sits
+  next to the code it constrains), but the mechanism is a decorator →
+  `Spec` → `Goal` → `gate()` pipeline, not Dafny's WP→Boogie→Z3. See the
+  Dafny/JML/decorator comparison if revisiting the design.
+- **`gate.py`** — concrete instantiation of
+  `drafts/autumn-pl-handlers-and-properties.md` Part 1 D4. Goal shapes map to
+  the doc's properties (FootprintExclude ≈ P_1/P_4/P_6/P_8/P_12;
+  ModularArithmetic ≈ P_3/P_11). Library-conditional shapes (invariant,
+  existential) wait on the typed goal/idiom library in §2.5 of that draft.
+- **`inference.py`** — the §2 typing rules as a handler-stack computation
+  ("same evaluator, different handlers": a term evaluates to a *type token*
+  under `TypeOfHandler`). Closes §2.2's `uniformChoice : List T -> T` gap that
+  the runtime `_check_type` alone can't enforce.
+- **`_ast_rewrite.py`** — a pragmatic stand-in until effectful PR #288
+  (eb-disassembler) grows statement-level support; until then we source-rewrite
+  code we can read off disk. The lift is observably sound only because every
+  supported shape factors side effects out of the conditional (assignments,
+  returns, or one same-callable call) — `if_then_else` evaluates *both*
+  branches eagerly, unlike Python's short-circuiting `if`.

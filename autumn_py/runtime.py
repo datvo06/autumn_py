@@ -124,10 +124,7 @@ class Runtime:
                     for clause in self.spec.on_clauses:
                         pred = clause.predicate
                         result = pred() if callable(pred) else pred
-                        # §2.3: on-clause predicates must be Bool. Coerce
-                        # bool subclasses (the event-sentinel __bool__'s
-                        # result is bool by definition; lambdas may return
-                        # non-bool truthy/falsy — reject those).
+                        # on-clause predicates must be bool, not just truthy.
                         if not isinstance(result, bool):
                             raise TypeMismatch(
                                 f"on-clause predicate {clause.name!r} returned "
@@ -138,13 +135,9 @@ class Runtime:
                             clause.body()
                 write_buf.flush(self.state)
 
-            # Next-phase: iterate state vars in declaration order. Skip a
-            # var whose name was written by an on-clause this tick
-            # (on_writes_this_tick). Otherwise evaluate its next-expression
-            # and commit. A next-expression MAY call set_var on sibling
-            # vars; those writes pass through StateHandler._set to
-            # _globals directly, do not populate on_writes_this_tick, and
-            # become visible to later next-exprs via get_var.
+            # Next-phase: in declaration order, skip vars an on-clause wrote
+            # this tick (on_writes_this_tick), else run the next-expr and
+            # commit. Sibling set_var writes pass through _set untracked.
             for sv in self.spec.state_vars:
                 if sv._next_fn is None:
                     continue

@@ -64,15 +64,8 @@ def state_has(name: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Structural list combinators as effects.
-#
-# Higher-level Autumn primitives (addObj, removeObj, updateObj) are written
-# as plain Python on top of these — handlers (TypeOfHandler today, future
-# symbolic / reduction handlers) only need to interpret the combinators.
-#
-# The defaults are standard list semantics; type-domain interpretations
-# preserve the list type, which is sound for Autumn's structural uses
-# (where the function's domain and codomain coincide).
+# Structural list combinators as effects. addObj / removeObj / updateObj are
+# plain Python over these, so handlers only interpret the combinators.
 # --------------------------------------------------------------------------
 
 @defop
@@ -108,25 +101,11 @@ def adjPositions_op(p):
 
 @defop
 def if_then_else(cond, then_branch, else_branch):
-    """Three-way conditional op.
+    """Three-way conditional op. Default: ``then_branch`` if ``cond`` else
+    ``else_branch``; under ``SmtCollectHandler`` it lowers to ``z3.If``.
 
-    Under ground execution: returns ``then_branch`` if ``cond`` else
-    ``else_branch``. **Both arguments are evaluated eagerly** before
-    the op is called — this is Python function-call semantics, *not*
-    Python's `if/else` statement semantics. The op short-circuits
-    *after* its arguments are computed, not before.
-
-    Under handlers like ``SmtCollectHandler``: lowers to
-    ``z3.If(cond, then_branch, else_branch)`` so symbolic conditionals
-    can be expressed without Python's native ``if`` (which would call
-    ``__bool__`` on a Z3 expression and fail).
-
-    The eager-evaluation contract means callers must not put
-    side-effecting expressions in only one branch — both branches'
-    arguments are computed regardless of ``cond``. The supported
-    rewrite patterns in ``autumn_py._ast_rewrite.symbolic`` enforce
-    this by only lifting `if/else` shapes whose branches are pure
-    expressions or factor side effects out of the conditional.
+    **Both branches are evaluated eagerly** (function-call, not `if/else`,
+    semantics), so callers must not put side effects in only one branch.
     """
     if cond:
         return then_branch

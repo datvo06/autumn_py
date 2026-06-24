@@ -273,26 +273,11 @@ def on(predicate):
 # --------------------------------------------------------------------------
 
 class AutumnObj:
-    """Base class for ``@obj``-decorated classes. Inherit from this so that
-    type-checkers (mypy / Pyright) understand the factory signature.
-
-    Mypy has a known limitation (issue #3135): class decorators that return
-    non-class objects (like ``@obj``, which returns a factory function)
-    lose call-type information. Mypy reports ``Too many arguments`` when
-    you write ``Player(Position(8, 14))`` because it sees the bare
-    ``class Player:`` (no ``__init__``) rather than the decorator's return.
-
-    Inheriting from ``AutumnObj`` provides:
-
-    * a flexible ``__new__(cls, *args, **kwargs) -> ObjectInstance`` stub
-      that mypy reads — so ``Player(Position(8, 14))`` is typed as
-      ``ObjectInstance`` (matching what the runtime factory actually returns),
-      which lets ``addObj``/``removeObj``/``updateObj`` overloads pick the
-      right variant.
-    * a permissive ``__init__`` matching ``__new__`` to satisfy mypy.
-
-    Neither stub runs at runtime: ``@obj`` replaces the class entirely with
-    a factory function that constructs ``ObjectInstance`` directly.
+    """Base class for ``@obj`` classes — a type-checker shim so
+    ``Player(Position(8, 14))`` is seen as returning ``ObjectInstance``
+    (mypy/Pyright otherwise read the bare class and reject the call; mypy
+    #3135). Neither stub runs: ``@obj`` replaces the class with a factory
+    that builds ``ObjectInstance`` directly.
     """
     def __new__(cls, *args: object, **kwargs: object) -> "ObjectInstance":  # type: ignore[misc]
         ...
@@ -397,11 +382,8 @@ def program(**config):
         state_vars: list[StateVar] = []
         seen_names: set[str] = set()
 
-        # Walk cls.__dict__ for StateVar instances (the only state-var
-        # declaration form we accept). Plain annotations like
-        # ``step_count: int = 0`` are *rejected* with a clear error —
-        # state vars must be explicit so it's unambiguous what's a state
-        # var vs. a class-level constant or helper.
+        # Collect StateVar instances; annotated non-StateVar attrs are
+        # rejected below so state vars stay explicit.
         for name, val in list(cls.__dict__.items()):
             if isinstance(val, StateVar):
                 state_vars.append(val)
@@ -424,10 +406,9 @@ def program(**config):
                 f"For non-state-var class attributes, omit the annotation."
             )
 
-        # Materialise spec goals from any `__autumn_spec__` attached to
-        # next-clause bodies. Done here (not at @<sv>.next decoration
-        # time) because StateVar names bind during class-body finalisation
-        # via ``__set_name__``; the decorator runs earlier with name=None.
+        # Materialise spec goals from __autumn_spec__ on next-clause bodies.
+        # Done here, not at @<sv>.next time, because names bind via
+        # __set_name__ only after the class body finishes.
         from .properties import _pending_properties, realize_spec_goals
         for sv in state_vars:
             if sv._next_fn is None:

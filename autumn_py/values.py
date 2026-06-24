@@ -30,7 +30,7 @@ class Cell:
 
     def resolve_color(self, inst: "ObjectInstance") -> str:
         c = self.color(inst) if callable(self.color) else self.color
-        # §2.3: cell color expressions are typed Str. Enforce at render time.
+        # cell color must resolve to str; enforced at render time.
         if not isinstance(c, str):
             from .api import TypeMismatch  # local import: api ↔ values cycle
             raise TypeMismatch(

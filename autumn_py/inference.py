@@ -1,15 +1,10 @@
 """Static type inference for next-expressions.
 
-Implements the §2 typing rules as a handler-stack computation: an
-expression $e$ that evaluates to a value under the standard handler stack
-evaluates to a *type token* under the TypeOfHandler stack. This is the
-"same evaluator, different handlers" thesis — type inference is one more
-non-standard semantics over $\\mathsf{Comp}_A$.
-
-Closes §2.2's $\\texttt{uniformChoice} : \\texttt{List}\\,T \\to T$ gap that
-the runtime _check_type alone cannot enforce: the element type $T$ is
-threaded through prev / list-builders / list-transformers and surfaces as
-the type of a uniformChoice result.
+Run a clause under ``TypeOfHandler`` and it evaluates to a *type token*
+instead of a value — type inference as one more handler stack over the same
+ops. Threads element types through prev / list-builders / list-transformers
+so ``uniformChoice : List T -> T`` resolves (which the runtime ``_check_type``
+alone can't). See ``drafts/refactor-design-notes.md``.
 """
 from __future__ import annotations
 
@@ -125,7 +120,7 @@ class TypeOfHandler(ObjectInterpretation):
 
     @implements(sample_uniform)
     def _sample_uniform(self, xs: Any) -> Type:
-        # Closes the §2.2 gap: uniformChoice : List T → T
+        # uniformChoice : List T -> T
         if isinstance(xs, Type) and xs.is_list and xs.elem is not None:
             return xs.elem
         # Tuple of Type tokens (e.g. uniformChoice over a literal list)
@@ -203,8 +198,8 @@ def infer_type(fn: Callable[[], Any], env: dict[str, Type]) -> Type:
 
     Concrete arithmetic (e.g. `m.bullets + 1`) and pure-Python control
     flow are *not* re-interpreted; they run normally on whatever values
-    they see. For straight-line synthesizable next-expressions composed
-    of the typed primitives, this is sufficient to close the §2.2 gap.
+    they see. Sufficient for straight-line next-expressions composed of the
+    typed primitives.
     """
     with handler(TypeOfHandler(env)):
         return fn()

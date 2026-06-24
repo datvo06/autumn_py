@@ -1,23 +1,12 @@
 """Round-kernel gate for the synthesis loop.
 
-The gate consumes (1) a `@program`-decorated emit class and (2) a list
-of typed `Goal` subclass instances, and returns the list of residuals
-naming the goals the emit failed.
-
-Concrete instantiation of `drafts/autumn-pl-handlers-and-properties.md`
-Part 1 D4. Each goal subclass carries shape-specific fields; dispatch
-is by `isinstance`. Each checker returns ``Residual | None`` —
-``None`` means the goal passed.
-
-Currently implemented goal shapes:
-
-* :class:`FootprintExcludeGoal` — syntactic-dependency checks against
-  the read-set (P_1, P_4, P_6, P_8, P_12 in the doc).
-* :class:`ModularArithmeticGoal` — bounded-model SMT check via
-  ``autumn_py.smt.collect_smt`` and ``solve_against_goal`` (P_3, P_11).
-
-Library-conditional shapes (invariant, existential) wait on the typed
-goal/idiom library described in §2.5 of the draft.
+``gate(emit_cls, goals)`` checks each typed ``Goal`` against a
+``@program``-decorated emit and returns the residuals (the goals it failed).
+Dispatch is by ``isinstance`` (``_CHECKERS``); each checker returns
+``Residual | None``. Goal shapes: ``FootprintExclude`` (read-set check),
+``ModularArithmetic`` (bounded SMT), ``WriteFrame`` (write-set ⊆ allowed),
+``TrajectoryInvariant`` (concrete walk). See
+``drafts/autumn-pl-handlers-and-properties.md`` Part 1 D4.
 """
 from __future__ import annotations
 
@@ -77,21 +66,14 @@ class ModularArithmeticGoal(Goal):
 class TrajectoryInvariantGoal(Goal):
     """Concrete-trajectory invariant.
 
-    Walks the program for ``steps`` ticks under the live runtime stack,
-    capturing a snapshot of every state var before and after each tick.
-    For each ``t`` in ``range(steps)``, ``predicate`` is invoked with
-    each state-var name bound to a per-tick lookup function so the
-    lambda body can index by tick:
+    Walks the program for ``steps`` ticks, snapshotting every state var.
+    ``predicate`` is called per tick with each state-var name bound to a
+    per-tick lookup and a final ``t`` (indices clamp to the recorded range)::
 
-        ``lambda ant, food, t: dist(ant(t+1), food(t)) <= dist(ant(t), food(t))``
+        lambda ant, food, t: dist(ant(t+1), food(t)) <= dist(ant(t), food(t))
 
-    Same indexed-function shape as :class:`ModularArithmeticGoal`'s
-    ``invariant``, but resolved against recorded snapshots (concrete
-    Python values) rather than Z3 functions. Tick indices clamp to the
-    recorded range — out-of-range reads return the boundary snapshot.
-
-    A residual is returned on the first ``t`` at which ``predicate``
-    returns falsy; the witness is ``{"t": t, "snapshot": snapshots[t]}``.
+    Returns a residual on the first failing ``t``; witness is
+    ``{"t": t, "snapshot": snapshots[t]}``.
     """
     predicate: Callable[..., Any]
     steps: int = 10
@@ -99,19 +81,11 @@ class TrajectoryInvariantGoal(Goal):
 
 @dataclass(frozen=True)
 class WriteFrameGoal(Goal):
-    """The decorated body's write-set must be a subset of
-    ``allowed_writes`` (plus the implicitly-allowed state var the
-    body is the next-clause for: e.g., ``foo.next``'s write to ``foo``
-    is always allowed).
-
-    Catches the silent-aliasing failure mode: a next-clause for
-    ``step_count`` accidentally writes to ``next_spawn_step``. Today's
-    runtime would silently let the side-write through; this goal
-    surfaces it as a residual at gate time.
-
-    Implementation: runs the next-clause under ``read_set`` (which
-    records ``("set_var", name)`` atoms for every write); checks the
-    write-set against ``allowed_writes ∪ {self_var}``.
+    """The decorated body's write-set must be ⊆ ``allowed_writes`` plus the
+    state var it is the next-clause for (``foo.next`` may always write
+    ``foo``) — catches a next-clause that accidentally writes a sibling var.
+    Checked by running it under ``read_set`` and comparing the
+    ``("set_var", name)`` atoms against ``allowed_writes ∪ {self_var}``.
     """
     allowed_writes: tuple[str, ...]
 

@@ -1,26 +1,15 @@
 """Property annotations for `@program`-decorated classes.
 
-Borrows Dafny's pattern of attaching specifications inline with code:
-each next-clause carries its spec via a single ``@spec(...)`` decorator
-(or smaller standalone decorators like ``@modifies(...)`` /
-``@no_stochastic`` for compound-spec ergonomics).
+A next-clause carries its spec via a decorator that records metadata on the
+function (``__autumn_spec__``); ``@program`` realizes that into ``Goal``
+instances on ``cls._autumn_spec.properties``, which ``gate()`` checks.
 
-The decorator records spec metadata onto the function (``__autumn_spec__``).
-StateVar.next / @on(...) recognise the metadata and mint corresponding
-Goal subclass instances against their anchor, registering them on a
-module-level ``_pending_properties`` list. ``@program`` drains this
-list into ``cls._autumn_spec.properties``; ``gate(emit_cls)`` reads
-from there when no explicit goals are passed.
-
-Annotations supported in this module:
-
-* ``@spec(...)`` — bundle: ``no_stochastic`` / ``modifies`` /
-  ``invariant`` / ``unroll`` / ``init_constraints`` / ``horizon``.
+* ``@spec(...)`` — bundle: ``no_stochastic`` / ``modifies`` / ``invariant`` /
+  ``unroll`` / ``init_constraints`` / ``horizon`` / ``trajectory_invariant``.
 * ``@no_stochastic`` — sugar for ``@spec(no_stochastic=True)``.
 * ``@modifies(*allowed_writes)`` — sugar for ``@spec(modifies=...)``.
 
-Compose by stacking — ``@spec(...)`` and ``@modifies(...)`` on the same
-function merge their fields. Last decorator wins on conflicts.
+Stacking decorators merges their fields (last wins on conflicts).
 """
 from __future__ import annotations
 

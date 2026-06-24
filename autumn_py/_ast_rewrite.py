@@ -1,50 +1,22 @@
 """AST source-rewriting for native `if/else` in autumn-op-using callables.
 
-The `@symbolic` decorator rewrites Python's `if/else` statements and
-`a if c else b` ternaries into explicit `if_then_else` op calls, so the
-resulting function works under handlers that can't dispatch on a Python
-`bool` derived from a symbolic value (notably `SmtCollectHandler` —
-Z3 expressions raise on `__bool__`).
+The `@symbolic` decorator rewrites `if/else` statements and `a if c else b`
+ternaries into `if_then_else` op calls, so the function works under handlers
+that can't bool a symbolic value (e.g. `SmtCollectHandler`). The source must
+be retrievable via `inspect.getsource` (file-defined functions; lambdas fail).
 
-This module is deliberately separate from `autumn_py.smt`: AST rewriting
-is a generic Python-syntax concern, not an SMT concern. Effectful's PR
-#288 (eb-disassembler) is the cleaner long-term path; until that lands
-and grows function-body / statement-level support, source-rewriting is
-the pragmatic alternative for code we can read off disk.
+Supported shapes (asymmetric / structurally-different branches raise
+`SyntaxError` at decoration time):
 
-Restrictions
-------------
-The function's source must be retrievable via `inspect.getsource` —
-file-defined functions only; lambdas without source fail at decoration.
-Supported `if/else` shapes are:
+* Ternary: ``x = a if cond else b``.
+* Assignment: ``if cond: x = a else: x = b`` — same single target.
+* Return: ``if cond: return a else: return b`` — both return a value.
+* Same-callable: ``if cond: f(args1) else: f(args2)`` — same callable and
+  arity; differing args wrapped per-position; differing string-literal args
+  (state-var names) rejected.
 
-* Ternary: ``x = a if cond else b`` →
-  ``x = if_then_else(cond, a, b)``.
-* Assignment-form: ``if cond: x = a; else: x = b`` →
-  ``x = if_then_else(cond, a, b)``. Both branches must assign to the
-  same single target.
-* Return-form: ``if cond: return a; else: return b`` →
-  ``return if_then_else(cond, a, b)``. Both branches must return a value.
-* Same-callable form: ``if cond: f(args1); else: f(args2)`` →
-  ``f(...)`` with each differing argument position wrapped in
-  ``if_then_else(cond, args1[i], args2[i])``. Function callable and
-  arity must match; differing string-literal args (typically state-var
-  names) are rejected since names cannot be conditional.
-
-Asymmetric branches and structurally different bodies raise
-`SyntaxError` at decoration time.
-
-Caveats
--------
-The rewrite preserves observable semantics under ground execution
-**only when both branches are pure expressions** (arithmetic, op calls
-with the same effect set). Python's `if/else` short-circuits — only
-one branch's side effects fire — but `if_then_else` evaluates both
-arguments eagerly. The supported patterns above all factor side
-effects out of the conditional (assignments to a target, returns, or
-a single same-callable call), which keeps the rewrite sound in
-practice. Patterns with branch-only side effects (e.g.
-``if cond: set_var(...)`` with empty `else`) are rejected.
+`if_then_else` evaluates both branches eagerly, so the lift is sound only when
+branches are pure expressions — see ``drafts/refactor-design-notes.md``.
 """
 from __future__ import annotations
 

@@ -1,32 +1,11 @@
 """Symbolic-constraint extraction for next-expressions.
 
-The same evaluator as ground execution, run under a different handler
-stack — `SmtCollectHandler` reinterprets the autumn op vocabulary in
-Z3's symbolic-expression domain. Each StateVar `name` is encoded as a
-Z3 function ``name : Int -> Sort``; the Int argument is the tick. A
-read at the handler's symbolic tick `t` produces ``name(t)``; a write
-via ``set_var(name, v)`` records the transition rule ``name(t+1) = v``.
-At finalization, transition rules are universally quantified over t.
-
-Free variables in the program — the StateVars themselves and the fresh
-existentials introduced by ``sample_uniform`` — *are* the symbolic
-variables. There is no parallel name-space; constraints are written
-over Z3 expressions whose function declarations match the StateVar
-names. The user's goal-writing API is just normal Python operators
-(`+`, `==`, `%`, ...) on Z3 expressions, because Z3 overloads them all.
-
-This is the architectural pattern from RoboTL's ``solve_init`` adapted
-to a finite-domain SMT setting: a collection handler produces (free
-variables, constraints), and a backend solver consumes them to return
-either an Interpretation (model) or UNSAT.
-
-Limitations
------------
-The handler does not interpret Python's native ``if`` on symbolic
-values — Z3 expressions are not directly truthy. Use ``if_then_else``
-(a `@defop` exported from this module) for symbolic conditionals; under
-the SmtCollectHandler it lowers to ``z3.If``. Under ground execution it
-behaves like a normal Python if/else.
+``SmtCollectHandler`` reinterprets the autumn op vocabulary in Z3: each
+StateVar is a Z3 function ``name : Int -> Sort`` indexed by the tick, a read
+at tick ``t`` is ``name(t)``, a write records ``name(t+1) = v``, and the
+transition rules are universally quantified over ``t`` at finalization.
+Native ``if`` on a symbolic value can't be interpreted (Z3 exprs aren't
+truthy) — use ``if_then_else``. See ``drafts/refactor-design-notes.md``.
 """
 from __future__ import annotations
 
@@ -221,12 +200,8 @@ class SmtCollectHandler(ObjectInterpretation):
 
     def lifted_constraints(self) -> list[z3.BoolRef]:
         """Constraints with the per-tick transition rules universally
-        quantified over t. This is the form the SMT-LIB block in
-        `drafts/autumn-pl-handlers-and-properties.md` Part 1 D4 quotes.
-
-        If the handler was constructed with a concrete `tick_value`, the
-        transitions are already instantiated and quantification is a
-        no-op — same as `init_constraints()`."""
+        quantified over t. With a concrete ``tick_value`` the transitions are
+        already instantiated, so quantification is a no-op (== init_constraints)."""
         if not self._symbolic_tick:
             return self.init_constraints()
         out = list(self.globals)
