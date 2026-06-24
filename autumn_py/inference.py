@@ -30,7 +30,7 @@ from .ops import (
     sample_uniform,
     state_has,
 )
-from .values import Cell, ObjectInstance, Position
+from .values import ObjectInstance, Position
 
 
 # --------------------------------------------------------------------------
