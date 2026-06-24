@@ -112,3 +112,76 @@ each module *is*:
   supported shape factors side effects out of the conditional (assignments,
   returns, or one same-callable call) — `if_then_else` evaluates *both*
   branches eagerly, unlike Python's short-circuiting `if`.
+
+## Spec-system design vs. LemmaScript
+
+A design comparison of two ways to attach machine-checkable specs to code, and
+where each is *leaner*. "Leaner" is multi-axis — it inverts depending on whether
+you count code-you-write, surface-you-depend-on, or work-you-still-owe a human.
+(LemmaScript claims are from its README, github.com/midspiral/LemmaScript, and
+may not reflect internals.)
+
+**The two systems.** *LemmaScript*: specs are `//@` comments in TypeScript
+(`requires`/`ensures`/`invariant`/`decreases`/`type`); a transpiler lowers them
+to **Dafny or Lean 4** and the *target prover* discharges them (Dafny's
+Boogie→Z3, or Lean's tactics), with the human supplying proofs in a companion
+file. *`autumn_py`*: specs are **decorators** (`@spec`/`@modifies`/
+`@no_stochastic`) that attach a live `Spec` to a next-clause; `@program`
+realizes them into typed `Goal`s; `gate()` discharges each **in-process** by
+footprint (`read_set`), bounded SMT (Z3 unroll), or a concrete walk — no human
+proofs.
+
+| Dimension | LemmaScript | `autumn_py` | Leaner |
+|---|---|---|---|
+| Authoring surface | `//@` comment DSL | Python decorators (live objects) | `autumn_py` — reuses host syntax |
+| Ingestion / parser | bespoke `//@` parser | none — interpreter evaluates decorators | **`autumn_py`** |
+| Checking code *you write* | almost none — transpile + delegate | ~1.1k LOC of bespoke checkers¹ | **LemmaScript** |
+| External surface *you depend on* | transpiler + Dafny (Boogie+Z3) or Lean 4 + tactics | `effectful`; `z3-solver` optional² | **`autumn_py`** — by a wide margin |
+| Verification power | full inductive functional verification | bounded SMT + syntactic + concrete | LemmaScript (the cost of leanness) |
+| Human proof effort | writes lemmas/tactics | none — auto-discharged within power | **`autumn_py`** |
+| Specs as data | comments → text, erased | live, composable (`Spec.merge`), introspectable | `autumn_py` (capability) |
+| Add a new spec kind | extend DSL **and** transpilation | add a `Goal` + checker + `Spec` field, in-repo | **`autumn_py`** |
+| Drift / failure mode | comments invisible to `tsc` | decorators are real code, can't be ignored | `autumn_py` |
+| Operational cost | transpiler + heavyweight prover per check | run Python; Z3 only for `invariant` | **`autumn_py`** |
+
+¹ `properties.py` 254 + `gate.py` 386 + `smt.py` 323 + `_ast_rewrite.py` 159 ≈
+**1,122 LOC**, self-contained in-repo (plus `inference.py` 220 for type
+inference). ² `pyproject.toml`: runtime dep is `effectful` alone; `z3-solver`
+is an optional extra needed only for `ModularArithmeticGoal`; footprint and
+trajectory goals need no solver.
+
+**Where the leanness inverts.** Separate two kinds of lean:
+
+> **`autumn_py` is the leaner *system*** — fewer moving parts, ~1.5
+> dependencies, no proof burden, specs-as-data. **LemmaScript is the leaner
+> *checker*** — it offloads verification to a real prover and writes almost
+> none itself, at the cost of a large trusted base and human proofs.
+
+`autumn_py` minimizes *trusted surface and operational cost* but reimplements a
+small bespoke checker and buys only **bounded** guarantees. LemmaScript
+minimizes *verification code it owns* but stands on a heavyweight prover and a
+human in the loop, for **unbounded, inductive** guarantees. They optimize
+opposite columns of the same table — pick by whether you want the leaner system
+to embed/operate (`autumn_py`) or the leaner path to a strong guarantee
+(LemmaScript).
+
+## Open design items
+
+Captured here so they aren't lost; none is a cleanup — each is a real decision.
+
+- **Bounded → unbounded `@spec(invariant=...)`.** `ModularArithmeticGoal`
+  unrolls the recurrence to a fixed `horizon` (`gate._check_modular`), so it
+  proves the invariant only up to that depth — where LemmaScript inherits
+  unbounded soundness from the prover. Closing the gap *without* leaving the
+  lean-system column means adding an inductive step to the gate: prove
+  `init ⟹ inv(0)` and `inv(k) ∧ transition ⟹ inv(k+1)` (k-induction with a
+  small `k` for strength) over the Z3 encoding already produced by
+  `collect_smt`, instead of/in addition to the bounded conjunction. This is a
+  new goal shape (or a flag on the existing one), not a tweak.
+- **`@symbolic` zero-pollution (EB-10 residual).** The private-name fix removed
+  the collision land mine but still writes one idempotent private key into the
+  decorated module's globals. A zero-write version would bind the op as a
+  default argument on the rewritten function (a local, baked into
+  `__defaults__`) instead of a global — needs AST signature surgery (inject a
+  keyword-only param, rewrite calls to it). Judged not worth the complexity for
+  one private symbol; recorded in case that calculus changes.
