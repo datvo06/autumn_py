@@ -306,7 +306,7 @@ def obj(cls) -> Callable[..., ObjectInstance]:
 
     spec = ObjectClassSpec(name=cls.__name__, cells=cells, field_names=field_names)
 
-    def __new__(factory_cls, *args: Any) -> ObjectInstance:  # type: ignore[misc]
+    def factory(*args: Any) -> ObjectInstance:
         expected = len(field_names) + 1
         if len(args) != expected:
             raise TypeError(
@@ -324,20 +324,15 @@ def obj(cls) -> Callable[..., ObjectInstance]:
                 fval, annotations[fname],
                 context=f"@obj {cls.__name__}.{fname}",
             )
+        fields = dict(zip(field_names, field_vals))
         return ObjectInstance(
-            cls=spec, origin=origin, id=alloc_obj_id(),
-            fields=dict(zip(field_names, field_vals)),
+            cls=spec, origin=origin, id=alloc_obj_id(), fields=fields
         )
 
-    # Return a real *class* (not a closure) so the @obj type is canonicalizable:
-    # ``list[Particle]`` then works with effectful's unify/typeof, so type
-    # inference needs no bespoke TypeVar binder. ``__new__`` returns an
-    # ObjectInstance (not an instance of this class), so ``__init__`` is skipped.
-    return type(cls.__name__, (), {
-        "__new__": __new__,
-        "__autumn_obj_spec__": spec,
-        "__qualname__": cls.__qualname__,
-    })
+    factory.__autumn_obj_spec__ = spec  # type: ignore[attr-defined]
+    factory.__name__ = cls.__name__
+    factory.__qualname__ = cls.__qualname__
+    return factory
 
 
 # --------------------------------------------------------------------------
