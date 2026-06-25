@@ -1,15 +1,13 @@
 """Static type inference for next-expressions (annotation-driven).
 
 Run a clause under the type-domain interpretation and it evaluates to a Python
-*type* instead of a value. The type rules live on the ``@defop`` signatures
-(single source of truth): each op's result type comes from effectful's own
-``op.__type_rule__``, which strips ``Annotated`` and binds TypeVars via
-``unify`` / ``substitute`` over Boxed type-valued args. Only ``get_var`` /
-``get_prev_var`` are bespoke — their result type is the *state var's* declared
-type, which lives in the env, not on the op signature.
-
-(``@obj`` types are real classes, so they canonicalize like any other type; no
-bespoke TypeVar binder is needed.)
+*type* instead of a value. Every op's result type comes from effectful's own
+``op.__type_rule__`` — installed as the default for *all* ops by handling the
+universal ``apply`` operation (the same mechanism ``effectful.typeof`` uses), so
+there is no per-op enumeration. Only ``get_var`` / ``get_prev_var`` are
+special-cased: their result type is the *state var's* declared type, which lives
+in the env, not on the op signature. (``@obj`` types are real classes, so they
+canonicalize like any other; no bespoke TypeVar binder is needed.)
 """
 from __future__ import annotations
 
@@ -18,37 +16,18 @@ from collections import ChainMap
 from collections.abc import Mapping
 from typing import Any, Callable
 
+from effectful.internals.runtime import interpreter
 from effectful.internals.unification import Box
-from effectful.ops.semantics import handler
+from effectful.ops.semantics import apply
 
-from .ops import (
-    adjPositions_op,
-    all_objs,
-    alloc_obj_id,
-    concat_op,
-    filter_op,
-    get_click_pos,
-    get_prev_var,
-    get_var,
-    grid_size,
-    is_event_active,
-    map_op,
-    sample_uniform,
-    state_has,
-)
-
-# Ops whose result type is read off their @defop return annotation.
-_ANNOTATION_OPS = (
-    sample_uniform, alloc_obj_id, is_event_active, get_click_pos, grid_size,
-    state_has, all_objs, map_op, filter_op, concat_op, adjPositions_op,
-)
+from .ops import get_prev_var, get_var
 
 
 def _box_if_type(x: Any) -> Any:
     """Normalize an argument for ``__type_rule__``: Box a type token, and lift a
     concrete list/tuple literal to its ``list[elem]`` type — its elements may be
     type tokens (e.g. ``addObj(xs, Particle)`` builds ``[Particle]``), which
-    ``nested_type`` can't recurse into. Other values (lambdas) pass through raw."""
+    ``nested_type`` can't recurse into. Other values (lambdas, Boxes) pass raw."""
     if isinstance(x, type) or typing.get_origin(x) is not None:
         return Box(x)
     if isinstance(x, (list, tuple)):
@@ -59,36 +38,22 @@ def _box_if_type(x: Any) -> Any:
     return x
 
 
-def _annotation_rule(op) -> Callable[..., Any]:
-    """Type-domain interpretation of ``op``: effectful derives the result type
-    from the op's own signature via ``__type_rule__`` (strips ``Annotated``,
-    binds TypeVars via ``unify``)."""
-    def rule(*arg_types: Any) -> Any:
-        return op.__type_rule__(*(_box_if_type(a) for a in arg_types))
-    return rule
-
-
-def type_interpretation(env: Mapping[str, Any]) -> dict:
-    """Build the type-domain interpretation: ``get_var`` / ``get_prev_var``
-    look up the (read-only, layered) env; every other op reads its annotation."""
+def infer_type(fn: Callable[[], Any], env: Mapping[str, Any]) -> Any:
+    """Run zero-arg ``fn`` in the type domain; return the Python type of its
+    result. ``env`` maps state-var names to types (read-only, layered)."""
     env = env if isinstance(env, ChainMap) else ChainMap(env)
 
-    def _lookup(name: str) -> Any:
-        if name not in env:
-            raise NameError(f"type-inference: unbound state var {name!r}")
-        return env[name]
+    def _apply(op, *args, **kwargs):
+        if op is get_var or op is get_prev_var:
+            name = args[0]
+            if name not in env:
+                raise NameError(f"type-inference: unbound state var {name!r}")
+            return Box(env[name])
+        return Box(op.__type_rule__(*(_box_if_type(a) for a in args), **kwargs))
 
-    interp: dict = {get_var: _lookup, get_prev_var: _lookup}
-    for op in _ANNOTATION_OPS:
-        interp[op] = _annotation_rule(op)
-    return interp
-
-
-def infer_type(fn: Callable[[], Any], env: Mapping[str, Any]) -> Any:
-    """Run zero-arg ``fn`` under the type-domain interpretation; return the
-    Python type of its result. ``env`` maps state-var names to types."""
-    with handler(type_interpretation(env)):
-        return fn()
+    with interpreter({apply: _apply}):
+        result = fn()
+    return result.value if isinstance(result, Box) else result
 
 
 def env_from_program(program_cls) -> ChainMap:
