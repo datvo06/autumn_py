@@ -48,20 +48,6 @@ class AntsGame:
 
     @ants.next
     @spec(
-        # After each tick, every ant's nearest-food distance — measured
-        # against the union of pre-tick and post-tick food (so newly
-        # spawned pellets count as valid targets, and just-eaten pellets
-        # still count as distance 0) — must not exceed its pre-tick
-        # nearest-food distance. Per-ant ``min``-of-``min`` rather than a
-        # summed total: catches an ant that ignores a freshly spawned
-        # adjacent pellet, while staying sound under food removal
-        # (eating a close pellet doesn't falsely fail the spec because
-        # the eaten pellet is still in ``foods(t)``).
-        #
-        # Vacuous when no food exists at the start of the tick.
-        # ``ants(t)`` / ``foods(t)`` are per-tick lookup functions —
-        # the gate's TrajectoryInvariantGoal walks t over recorded
-        # snapshots and binds these by parameter name.
         trajectory_invariant=lambda ants, foods, t:
             (len(foods(t)) == 0) or all(
                 min(sqdist(a_next.origin, f.origin)
